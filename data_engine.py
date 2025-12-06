@@ -2,10 +2,18 @@ import ccxt
 import pandas as pd
 import sqlite3
 import time
+import os
 from datetime import datetime, timedelta
 
 class TradeDataEngine:
-    def __init__(self, db_path='trade_review.db'):
+    def __init__(self, db_path=None):
+        # --- 核心修改：强制使用绝对路径，避免"幽灵数据库"问题 ---
+        if db_path is None:
+            # 获取当前脚本所在目录的绝对路径
+            basedir = os.path.abspath(os.path.dirname(__file__))
+            # 数据库文件固定放在脚本目录下，文件名固定为 trade_review.db
+            db_path = os.path.join(basedir, 'trade_review.db')
+            print(f"📁 数据库锁定位置: {db_path}")  # 启动时打印路径以便调试
         self.db_path = db_path
         self._init_db()
 
@@ -288,3 +296,175 @@ class TradeDataEngine:
             return False
         finally:
             conn.close()
+    
+    def add_manual_trade(self, api_key, symbol, direction, pnl, date_str, strategy="", note=""):
+        """手动录入交易（不需要从交易所同步）"""
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        try:
+            key_tag = api_key.strip()[-4:] if api_key else "MANU"
+            
+            # 将日期字符串转换为时间戳
+            try:
+                dt_obj = datetime.strptime(date_str, '%Y-%m-%d %H:%M')
+                timestamp_ms = int(dt_obj.timestamp() * 1000)
+                datetime_iso = dt_obj.strftime('%Y-%m-%d %H:%M:%S')
+            except:
+                timestamp_ms = int(datetime.now().timestamp() * 1000)
+                datetime_iso = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            
+            # 生成唯一ID（使用时间戳+随机数）
+            import uuid
+            base_id = f"MANUAL_{timestamp_ms}_{str(uuid.uuid4())[:8]}"
+            
+            # 确定 side（根据方向）
+            side = "buy" if direction.lower() == "long" else "sell"
+            
+            # 🌟 关键修改：创建两笔记录（开仓+平仓），确保能形成完整的 round trip
+            # 这样 process_trades_to_rounds 就能正确处理手动录入的交易
+            
+            # 第一笔：开仓（数量设为1，盈亏设为0）
+            open_id = f"{base_id}_OPEN"
+            c.execute('''
+                INSERT INTO trades 
+                (id, timestamp, datetime, symbol, side, price, amount, cost, fee, fee_currency, pnl, api_key_tag, strategy, notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                open_id,
+                timestamp_ms,
+                datetime_iso,
+                symbol,
+                side,
+                0.0,
+                1.0,  # 开仓数量设为1
+                0.0,
+                0.0,
+                'USDT',
+                0.0,  # 开仓时盈亏为0
+                key_tag,
+                strategy,
+                note
+            ))
+            
+            # 第二笔：平仓（数量设为1，盈亏为用户输入的值）
+            close_id = f"{base_id}_CLOSE"
+            close_timestamp_ms = timestamp_ms + 60000  # 平仓时间比开仓晚1分钟
+            close_datetime_iso = datetime.fromtimestamp(close_timestamp_ms / 1000).strftime('%Y-%m-%d %H:%M:%S')
+            close_side = "sell" if side == "buy" else "buy"  # 平仓方向与开仓相反
+            
+            c.execute('''
+                INSERT INTO trades 
+                (id, timestamp, datetime, symbol, side, price, amount, cost, fee, fee_currency, pnl, api_key_tag, strategy, notes)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (
+                close_id,
+                close_timestamp_ms,
+                close_datetime_iso,
+                symbol,
+                close_side,
+                0.0,
+                1.0,  # 平仓数量设为1
+                0.0,
+                0.0,
+                'USDT',
+                float(pnl),  # 平仓时的盈亏（用户输入的总盈亏）
+                key_tag,
+                "",  # 平仓记录不重复策略和笔记
+                ""
+            ))
+            
+            conn.commit()
+            conn.close()
+            return True, "✅ 交易已成功录入！"
+        except Exception as e:
+            conn.close()
+            return False, f"❌ 录入失败: {str(e)}"
+    
+    def update_trade(self, trade_id, api_key, symbol, direction, pnl, date_str, strategy="", note=""):
+        """更新交易（编辑手动录入的交易）"""
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        try:
+            key_tag = api_key.strip()[-4:] if api_key else ""
+            
+            # 查找交易记录（应该有两笔：开仓和平仓）
+            c.execute("SELECT id FROM trades WHERE id LIKE ? AND api_key_tag = ?", (f"{trade_id}%", key_tag))
+            trade_ids = [row[0] for row in c.fetchall()]
+            
+            if not trade_ids:
+                conn.close()
+                return False, "❌ 未找到要更新的交易记录"
+            
+            # 将日期字符串转换为时间戳
+            try:
+                dt_obj = datetime.strptime(date_str, '%Y-%m-%d %H:%M')
+                timestamp_ms = int(dt_obj.timestamp() * 1000)
+                datetime_iso = dt_obj.strftime('%Y-%m-%d %H:%M:%S')
+            except:
+                # 如果日期格式错误，保持原时间戳
+                c.execute("SELECT timestamp, datetime FROM trades WHERE id = ? AND api_key_tag = ?", 
+                         (trade_ids[0], key_tag))
+                result = c.fetchone()
+                if result:
+                    timestamp_ms = result[0]
+                    datetime_iso = result[1]
+                else:
+                    timestamp_ms = int(datetime.now().timestamp() * 1000)
+                    datetime_iso = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            
+            # 确定 side
+            side = "buy" if direction.lower() == "long" else "sell"
+            close_side = "sell" if side == "buy" else "buy"
+            
+            # 更新开仓记录（第一个ID）
+            open_id = [tid for tid in trade_ids if tid.endswith('_OPEN')]
+            if open_id:
+                c.execute('''
+                    UPDATE trades 
+                    SET symbol = ?, side = ?, timestamp = ?, datetime = ?, strategy = ?, notes = ?
+                    WHERE id = ? AND api_key_tag = ?
+                ''', (symbol, side, timestamp_ms, datetime_iso, strategy, note, open_id[0], key_tag))
+            
+            # 更新平仓记录（第二个ID，更新盈亏和时间）
+            close_id = [tid for tid in trade_ids if tid.endswith('_CLOSE')]
+            if close_id:
+                close_timestamp_ms = timestamp_ms + 60000
+                close_datetime_iso = datetime.fromtimestamp(close_timestamp_ms / 1000).strftime('%Y-%m-%d %H:%M:%S')
+                c.execute('''
+                    UPDATE trades 
+                    SET symbol = ?, side = ?, timestamp = ?, datetime = ?, pnl = ?
+                    WHERE id = ? AND api_key_tag = ?
+                ''', (symbol, close_side, close_timestamp_ms, close_datetime_iso, float(pnl), close_id[0], key_tag))
+            
+            conn.commit()
+            conn.close()
+            return True, "✅ 交易已成功更新！"
+        except Exception as e:
+            conn.close()
+            return False, f"❌ 更新失败: {str(e)}"
+    
+    def delete_trade(self, trade_id, api_key):
+        """删除交易（删除开仓和平仓两笔记录）"""
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        try:
+            key_tag = api_key.strip()[-4:] if api_key else ""
+            
+            # 查找所有相关的交易记录（开仓和平仓）
+            c.execute("SELECT id FROM trades WHERE id LIKE ? AND api_key_tag = ?", (f"{trade_id}%", key_tag))
+            trade_ids = [row[0] for row in c.fetchall()]
+            
+            if not trade_ids:
+                conn.close()
+                return False, "❌ 未找到要删除的交易记录"
+            
+            # 删除所有相关记录
+            for tid in trade_ids:
+                c.execute("DELETE FROM trades WHERE id = ? AND api_key_tag = ?", (tid, key_tag))
+            
+            conn.commit()
+            conn.close()
+            return True, "✅ 交易已成功删除！"
+        except Exception as e:
+            conn.close()
+            return False, f"❌ 删除失败: {str(e)}"

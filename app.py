@@ -175,6 +175,7 @@ with st.sidebar:
 # ==============================================================================
 # 3. 主界面：复盘工作台 (左列表，右详情)
 # ==============================================================================
+
 if selected_key:
     # 1. 加载原始数据
     raw_df = engine.load_trades(selected_key)
@@ -189,9 +190,76 @@ if selected_key:
             st.warning("🤔 有数据，但没有检测到完整的【开仓-平仓】闭环。请确认是否有已平仓的订单。")
         else:
             # ======================================================================
+            # 顶部标题栏（带手动录入按钮）
+            # ======================================================================
+            dashboard_header_col1, dashboard_header_col2 = st.columns([1, 0.05])
+            with dashboard_header_col1:
+                st.markdown("### 📊 Dashboard")
+            with dashboard_header_col2:
+                if st.button("➕", help="手动录入交易", use_container_width=True, key="add_btn_top"):
+                    if 'show_add_form' not in st.session_state:
+                        st.session_state.show_add_form = False
+                    st.session_state.show_add_form = not st.session_state.show_add_form
+                    st.rerun()
+            
+            # ======================================================================
+            # 手动录入表单（可折叠，在 Dashboard 下方）
+            # ======================================================================
+            if st.session_state.get('show_add_form', False):
+                st.markdown("---")
+                with st.expander("➕ 手动录入交易", expanded=True):
+                    with st.form("add_trade_form", clear_on_submit=True):
+                        form_col1, form_col2 = st.columns(2)
+                        
+                        with form_col1:
+                            manual_symbol = st.text_input("币种 (Symbol)", placeholder="BTCUSDT", key="manual_symbol")
+                            manual_direction = st.selectbox("方向 (Direction)", ["做多 (Long)", "做空 (Short)"], key="manual_direction")
+                        
+                        with form_col2:
+                            manual_pnl = st.number_input("盈亏 (PnL) $", step=0.01, format="%.2f", key="manual_pnl")
+                            manual_date = st.date_input("日期", value=pd.Timestamp.now().date(), key="manual_date")
+                            manual_time = st.time_input("时间", value=pd.Timestamp.now().time(), key="manual_time")
+                        
+                        manual_strategy = st.text_input("策略 (Strategy)", placeholder="例如：趋势突破", key="manual_strategy")
+                        manual_note = st.text_area("初始笔记 (Note)", placeholder="开仓理由、心理状态...", height=100, key="manual_note")
+                        
+                        submit_col1, submit_col2, submit_col3 = st.columns([1, 2, 1])
+                        with submit_col2:
+                            submitted = st.form_submit_button("💾 保存交易", use_container_width=True, type="primary")
+                        
+                        if submitted:
+                            if not manual_symbol or manual_pnl is None:
+                                st.error("❌ 请填写币种和盈亏金额！")
+                            else:
+                                # 组合日期和时间
+                                date_time_str = f"{manual_date} {manual_time.strftime('%H:%M')}"
+                                # 提取方向（"做多 (Long)" -> "Long"）
+                                direction_clean = "Long" if "Long" in manual_direction else "Short"
+                                
+                                # 调用引擎保存
+                                success, msg = engine.add_manual_trade(
+                                    selected_key,
+                                    manual_symbol.upper(),
+                                    direction_clean,
+                                    manual_pnl,
+                                    date_time_str,
+                                    manual_strategy,
+                                    manual_note
+                                )
+                                
+                                if success:
+                                    st.success(msg)
+                                    st.session_state.show_add_form = False
+                                    time.sleep(0.5)
+                                    st.rerun()
+                                else:
+                                    st.error(msg)
+                
+                st.markdown("---")
+            
+            # ======================================================================
             # iOS 风格数据看板 (Bento Grid)
             # ======================================================================
-            st.markdown("### 📊 Dashboard")
             
             # --- 修复后的核心计算逻辑 ---
             total_trades = len(rounds_df)
@@ -469,6 +537,119 @@ if selected_key:
                 if selection.selection.rows:
                     idx = selection.selection.rows[0]
                     trade = show_df.iloc[idx]
+                    
+                    # 操作按钮区域（编辑和删除）
+                    action_col1, action_col2, action_col3 = st.columns([1, 1, 4])
+                    
+                    # 初始化 session_state
+                    edit_key = f"edit_{trade['round_id']}"
+                    if edit_key not in st.session_state:
+                        st.session_state[edit_key] = False
+                    
+                    with action_col1:
+                        if st.button("✏️ 编辑", use_container_width=True, key=f"edit_btn_{trade['round_id']}"):
+                            st.session_state[edit_key] = not st.session_state[edit_key]
+                            st.rerun()
+                    
+                    with action_col2:
+                        if st.button("🗑️ 删除", use_container_width=True, type="secondary", key=f"delete_btn_{trade['round_id']}"):
+                            # 删除确认对话框
+                            st.session_state[f"confirm_delete_{trade['round_id']}"] = True
+                            st.rerun()
+                    
+                    # 删除确认逻辑
+                    if st.session_state.get(f"confirm_delete_{trade['round_id']}", False):
+                        st.warning("⚠️ 确定要删除这笔交易吗？此操作不可恢复！")
+                        confirm_col1, confirm_col2 = st.columns(2)
+                        with confirm_col1:
+                            if st.button("✅ 确认删除", use_container_width=True, type="primary", key=f"confirm_yes_{trade['round_id']}"):
+                                # 提取基础ID（去掉_OPEN或_CLOSE后缀）
+                                base_id = trade['round_id'].replace('_OPEN', '').replace('_CLOSE', '')
+                                success, msg = engine.delete_trade(base_id, selected_key)
+                                if success:
+                                    st.success(msg)
+                                    time.sleep(0.5)
+                                    # 清除所有相关session_state
+                                    for key in list(st.session_state.keys()):
+                                        if trade['round_id'] in str(key):
+                                            del st.session_state[key]
+                                    st.rerun()
+                                else:
+                                    st.error(msg)
+                        with confirm_col2:
+                            if st.button("❌ 取消", use_container_width=True, key=f"confirm_no_{trade['round_id']}"):
+                                st.session_state[f"confirm_delete_{trade['round_id']}"] = False
+                                st.rerun()
+                    
+                    # 编辑表单（可折叠）
+                    if st.session_state.get(edit_key, False):
+                        st.markdown("---")
+                        with st.expander("✏️ 编辑交易", expanded=True):
+                            # 获取原始数据
+                            trade_row = raw_df[raw_df['id'] == trade['round_id']].iloc[0]
+                            current_strategy = trade_row.get('strategy', '')
+                            current_note = trade_row.get('notes', '')
+                            if pd.isna(current_strategy): current_strategy = ""
+                            if pd.isna(current_note): current_note = ""
+                            
+                            with st.form(f"edit_form_{trade['round_id']}", clear_on_submit=False):
+                                edit_form_col1, edit_form_col2 = st.columns(2)
+                                
+                                with edit_form_col1:
+                                    edit_symbol = st.text_input("币种 (Symbol)", value=trade['symbol'], key=f"edit_symbol_{trade['round_id']}")
+                                    edit_direction = st.selectbox("方向 (Direction)", 
+                                                                 ["做多 (Long)", "做空 (Short)"],
+                                                                 index=0 if "Long" in trade['direction'] else 1,
+                                                                 key=f"edit_direction_{trade['round_id']}")
+                                
+                                with edit_form_col2:
+                                    edit_pnl = st.number_input("盈亏 (PnL) $", value=float(trade['net_pnl']), 
+                                                               step=0.01, format="%.2f", key=f"edit_pnl_{trade['round_id']}")
+                                    # 提取日期和时间
+                                    try:
+                                        dt_obj = pd.to_datetime(trade['close_date_str'])
+                                        edit_date = st.date_input("日期", value=dt_obj.date(), key=f"edit_date_{trade['round_id']}")
+                                        edit_time = st.time_input("时间", value=dt_obj.time(), key=f"edit_time_{trade['round_id']}")
+                                    except:
+                                        edit_date = st.date_input("日期", value=pd.Timestamp.now().date(), key=f"edit_date_{trade['round_id']}")
+                                        edit_time = st.time_input("时间", value=pd.Timestamp.now().time(), key=f"edit_time_{trade['round_id']}")
+                                
+                                edit_strategy = st.text_input("策略 (Strategy)", value=current_strategy, key=f"edit_strategy_{trade['round_id']}")
+                                edit_note = st.text_area("初始笔记 (Note)", value=current_note, height=100, key=f"edit_note_{trade['round_id']}")
+                                
+                                submit_edit_col1, submit_edit_col2, submit_edit_col3 = st.columns([1, 2, 1])
+                                with submit_edit_col2:
+                                    submitted_edit = st.form_submit_button("💾 保存修改", use_container_width=True, type="primary")
+                                
+                                if submitted_edit:
+                                    # 组合日期和时间
+                                    date_time_str = f"{edit_date} {edit_time.strftime('%H:%M')}"
+                                    direction_clean = "Long" if "Long" in edit_direction else "Short"
+                                    
+                                    # 提取基础ID
+                                    base_id = trade['round_id'].replace('_OPEN', '').replace('_CLOSE', '')
+                                    
+                                    # 调用更新方法
+                                    success, msg = engine.update_trade(
+                                        base_id,
+                                        selected_key,
+                                        edit_symbol.upper(),
+                                        direction_clean,
+                                        edit_pnl,
+                                        date_time_str,
+                                        edit_strategy,
+                                        edit_note
+                                    )
+                                    
+                                    if success:
+                                        st.success(msg)
+                                        st.session_state[edit_key] = False
+                                        time.sleep(0.5)
+                                        st.rerun()
+                                    else:
+                                        st.error(msg)
+                        
+                        st.markdown("---")
                     
                     # 1. 顶部大标题卡片 (iOS风格)
                     pnl_color_class = "green" if trade['net_pnl'] >= 0 else "red"
