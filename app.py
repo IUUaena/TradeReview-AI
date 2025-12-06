@@ -3,172 +3,115 @@ import pandas as pd
 import plotly.express as px
 from data_engine import TradeDataEngine
 
-# -----------------------------------------------------------------------------
-# 1. 页面配置：必须放在第一行
-# -----------------------------------------------------------------------------
-st.set_page_config(
-    page_title="TradeReview AI",
-    page_icon="📈",
-    layout="wide",  # 使用宽屏模式，看数据更舒服
-    initial_sidebar_state="expanded"
-)
-
-# -----------------------------------------------------------------------------
-# 2. 辅助函数：计算核心指标
-# -----------------------------------------------------------------------------
-def calculate_metrics(df):
-    if df.empty:
-        return 0, 0, 0, 0
-    
-    total_pnl = df['pnl'].sum()
-    total_trades = len(df)
-    
-    # 胜率计算 (PnL > 0 视为胜)
-    winning_trades = len(df[df['pnl'] > 0])
-    win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
-    
-    # 最大单笔盈利
-    max_profit = df['pnl'].max()
-    
-    return total_pnl, win_rate, total_trades, max_profit
-
-# -----------------------------------------------------------------------------
-# 3. 初始化引擎
-# -----------------------------------------------------------------------------
+# 1. 页面配置
+st.set_page_config(page_title="TradeReview AI", page_icon="📈", layout="wide")
 engine = TradeDataEngine()
 
-# -----------------------------------------------------------------------------
-# 4. 侧边栏：控制中心
-# -----------------------------------------------------------------------------
+# 2. 侧边栏：操作区 (完全还原你的逻辑)
 with st.sidebar:
-    st.header("🔐 账户控制台")
-    
-    # API 输入区 (密码模式，不显示明文)
+    st.header("🔐 账户设置")
     api_key = st.text_input("Binance API Key", type="password")
     api_secret = st.text_input("Binance Secret Key", type="password")
     
     st.markdown("---")
+    st.subheader("🔄 交易同步")
     
-    # 按钮 A: 同步数据
-    if st.button("🔄 同步历史数据 (全量)"):
+    # === 还原：你熟悉的单选框逻辑 ===
+    mode = st.radio(
+        "选择同步模式", 
+        ["🚀 快速扫描 (最近7天)", "⛏️ 深度挖掘 (过去1年)"],
+        captions=["扫描所有币种，仅限最近。能立刻找回刚才的记录。", 
+                  "突破时间限制！太耗时，必须指定币种。"]
+    )
+    
+    target_coins = ""
+    if "深度" in mode:
+        st.info("💡 只有指定具体的币种，才能进行深度历史查询。")
+        target_coins = st.text_input("请输入交易过的币种 (逗号分隔)", value="BTC, ETH, SOL")
+    
+    # 进度条占位符
+    p_bar = st.progress(0)
+    status_text = st.empty()
+    
+    def update_progress_ui(msg, val):
+        status_text.text(msg)
+        p_bar.progress(val)
+
+    if st.button("开始同步"):
         if not api_key or not api_secret:
-            st.error("请输入 API Key 和 Secret")
+            st.error("请先输入 API Key 和 Secret")
         else:
-            with st.spinner("正在从交易所挖掘所有历史记录，请稍候..."):
-                msg = engine.fetch_and_save_all_history(api_key, api_secret)
-                if "成功" in msg:
-                    st.success(msg)
-                    st.rerun() # 刷新页面显示新数据
-                else:
-                    st.error(msg)
-    
+            # 转换模式参数
+            api_mode = 'recent' if "快速" in mode else 'deep'
+            
+            # 调用引擎
+            msg, count = engine.fetch_and_save(
+                api_key, api_secret, 
+                mode=api_mode, 
+                target_coins_str=target_coins,
+                progress_callback=update_progress_ui
+            )
+            
+            # 结果反馈
+            p_bar.empty()
+            status_text.empty()
+            if "失败" in msg or "错误" in msg:
+                st.error(msg)
+            else:
+                st.balloons()
+                st.success(f"🎉 同步成功！新增 {count} 条记录。")
+                st.rerun()
+
     st.markdown("---")
-    
-    # 按钮 B: 危险区域 - 隐私清除
-    st.subheader("⚠️ 危险区域")
-    if st.button("🗑️ 删除该账户所有数据", type="primary"):
-        if not api_key:
-            st.warning("请输入要删除数据的 API Key 以确认身份")
-        else:
-            deleted = engine.delete_account_data(api_key)
-            st.success(f"安全清除：已物理删除 {deleted} 条与该 Key 关联的记录。")
+    if st.button("🗑️ 删除该账户数据", type="primary"):
+        if api_key:
+            n = engine.delete_account_data(api_key)
+            st.warning(f"已删除 {n} 条数据")
             st.rerun()
 
-# -----------------------------------------------------------------------------
-# 5. 主界面：可视化仪表盘
-# -----------------------------------------------------------------------------
+# 3. 主界面：可视化展示
 st.title("📈 交易复盘 AI 驾驶舱")
 
-# 尝试加载数据
 if api_key:
     df = engine.load_trades(api_key)
 else:
     df = pd.DataFrame()
 
 if df.empty:
-    # 空状态显示
-    st.info("👋 欢迎！请在左侧输入 API Key 并点击"同步"以开始复盘之旅。")
-    st.markdown("""
-    **功能指引：**
-    1. 输入 Binance 合约 API Key (只读权限即可)。
-    2. 点击 **同步历史数据**，系统将抓取您账户所有的历史记录。
-    3. 数据存储在本地数据库，点击 **删除账户数据** 可彻底销毁。
-    """)
+    # --- 修复点：这里的 "开始同步" 改成了单引号 ---
+    st.info("👋 欢迎！请在左侧填入 Key，选择模式并点击 '开始同步'。")
 else:
-    # --- A. 核心指标卡片 (Metrics) ---
-    t_pnl, win_rate, t_count, max_p = calculate_metrics(df)
+    # 核心指标
+    pnl = df['pnl'].sum()
+    win_trades = len(df[df['pnl']>0])
+    win_rate = (win_trades / len(df) * 100) if len(df) > 0 else 0
     
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("💰 总盈亏 (USDT)", f"{t_pnl:,.2f}", delta=f"{t_pnl:,.2f}")
-    with col2:
-        st.metric("🎯 胜率", f"{win_rate:.1f}%")
-    with col3:
-        st.metric("📊 总交易笔数", f"{t_count}")
-    with col4:
-        st.metric("🚀 单笔最大盈利", f"{max_p:,.2f}")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("💰 总盈亏", f"{pnl:,.2f}", delta=f"{pnl:,.2f}")
+    c2.metric("🎯 胜率", f"{win_rate:.1f}%")
+    c3.metric("📊 交易数", len(df))
     
     st.markdown("---")
     
-    # --- B. 资金曲线图 (Visuals) ---
-    st.subheader("📉 资金/盈亏走势")
-    
-    # 数据预处理：按时间正序排列以便画图
+    # 图表
+    st.subheader("📉 资金曲线")
     df_chart = df.sort_values('timestamp')
-    # 计算累计盈亏 (Cumulative PnL)
     df_chart['cumulative_pnl'] = df_chart['pnl'].cumsum()
-    # 转换时间格式方便阅读
-    df_chart['date_str'] = pd.to_datetime(df_chart['timestamp'], unit='ms')
+    df_chart['date'] = pd.to_datetime(df_chart['timestamp'], unit='ms')
     
-    # 使用 Plotly 画交互式图表
-    fig = px.line(
-        df_chart, 
-        x='date_str', 
-        y='cumulative_pnl', 
-        title='累计盈亏曲线 (Cumulative PnL)',
-        markers=True
-    )
-    # 优化图表样式：深色背景，隐藏网格
-    fig.update_layout(
-        xaxis_title="时间",
-        yaxis_title="累计盈亏 (USDT)",
-        hovermode="x unified"
-    )
-    # 如果盈亏是正的，线显示绿色，负的显示红色 (简单处理)
-    line_color = '#00FF00' if t_pnl >= 0 else '#FF0000'
-    fig.update_traces(line_color=line_color)
-    
+    fig = px.line(df_chart, x='date', y='cumulative_pnl')
+    fig.update_traces(line_color='#00FF00' if pnl>=0 else '#FF0000')
     st.plotly_chart(fig, use_container_width=True)
     
-    # --- C. 详细交易列表 (Data Table) ---
-    st.subheader("📝 详细交易记录")
+    # 列表
+    st.subheader("📝 详细记录")
+    # 筛选功能
+    sel_coin = st.multiselect("筛选币种", df['symbol'].unique())
+    df_show = df[df['symbol'].isin(sel_coin)] if sel_coin else df
     
-    # 简单筛选器
-    filter_col1, filter_col2 = st.columns(2)
-    with filter_col1:
-        symbol_filter = st.multiselect("筛选币种", options=df['symbol'].unique())
-    with filter_col2:
-        side_filter = st.multiselect("筛选方向 (Long/Short)", options=df['side'].unique())
-        
-    # 应用筛选
-    df_display = df.copy()
-    if symbol_filter:
-        df_display = df_display[df_display['symbol'].isin(symbol_filter)]
-    if side_filter:
-        df_display = df_display[df_display['side'].isin(side_filter)]
-    
-    # 展示表格：只展示关键列，看着清爽
     st.dataframe(
-        df_display[['datetime', 'symbol', 'side', 'price', 'amount', 'pnl', 'fee']],
-        use_container_width=True,
-        height=400,
-        column_config={
-            "datetime": "时间",
-            "symbol": "币种",
-            "side": "方向",
-            "price": "价格",
-            "amount": "数量",
-            "pnl": st.column_config.NumberColumn("盈亏 (PnL)", format="$%.2f"),
-            "fee": "手续费"
-        }
+        df_show[['datetime', 'symbol', 'side', 'price', 'amount', 'pnl', 'fee']],
+        use_container_width=True, 
+        height=500,
+        column_config={"pnl": st.column_config.NumberColumn("盈亏", format="$%.2f")}
     )
