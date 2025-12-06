@@ -318,6 +318,120 @@ if selected_key:
             st.markdown("---")
             
             # ======================================================================
+            # 资金曲线图 (Equity Curve) - 交易所专业级
+            # ======================================================================
+            # 准备完整图表数据：按时间正序排列，计算累计盈亏
+            chart_df_full = rounds_df.sort_values(by='close_time', ascending=True).copy()
+            chart_df_full['cumulative_pnl'] = chart_df_full['net_pnl'].cumsum()
+            chart_df_full['date_str'] = pd.to_datetime(chart_df_full['close_time'], unit='ms')
+            
+            # 时间筛选器（交易所风格）
+            chart_header_col1, chart_header_col2 = st.columns([1, 1])
+            with chart_header_col1:
+                st.markdown("### 📈 PnL Analysis (资金曲线)")
+            with chart_header_col2:
+                time_period = st.radio(
+                    "时间范围",
+                    ["ALL", "90D", "30D", "7D"],
+                    horizontal=True,
+                    label_visibility="collapsed",
+                    key="time_filter"
+                )
+            
+            # 根据选择的时间范围筛选数据
+            if time_period == "ALL":
+                chart_df = chart_df_full.copy()
+            else:
+                days = int(time_period.replace("D", ""))
+                cutoff_date = pd.Timestamp.now() - pd.Timedelta(days=days)
+                chart_df = chart_df_full[chart_df_full['date_str'] >= cutoff_date].copy()
+            
+            # 如果筛选后没有数据，显示提示
+            if chart_df.empty:
+                st.info(f"📅 最近 {time_period} 内暂无交易数据。")
+            else:
+                # 使用 Plotly 绘制专业资金曲线（平滑贝塞尔曲线）
+                fig = px.area(
+                    chart_df,
+                    x='date_str',
+                    y='cumulative_pnl',
+                    title='',
+                    labels={'cumulative_pnl': '累计盈亏 (USDT)', 'date_str': '时间'},
+                    color_discrete_sequence=['#4CAF50'] if total_pnl >= 0 else ['#FF5252']
+                )
+                
+                # 交易所级深色模式样式配置
+                fig.update_layout(
+                    plot_bgcolor='#1E1E1E',   # 图表绘图区背景（深灰）
+                    paper_bgcolor='#1E1E1E',  # 整个画布背景（深灰）
+                    font=dict(color='#E0E0E0', family='-apple-system, BlinkMacSystemFont, sans-serif'), # 全局字体颜色（浅灰白）
+                    
+                    # X轴配置
+                    xaxis=dict(
+                        showgrid=False,       # 不显示纵向网格
+                        zeroline=False,       # 不显示X轴的零线
+                        tickfont=dict(color='#888888'), # 刻度文字颜色
+                        title=dict(font=dict(color='#888888')),
+                    ),
+                    
+                    # Y轴配置
+                    yaxis=dict(
+                        gridcolor='#333333',  # 横向网格颜色
+                        griddash='dash',      # 虚线网格（交易所风格）
+                        zeroline=True,        # 显示零线
+                        zerolinecolor='#666666', # 零线颜色（稍亮一点的灰色）
+                        zerolinewidth=1,      # 零线宽度
+                        # 注意：Plotly 不支持 zerolinedash 属性，零线是实线
+                        tickfont=dict(color='#888888'),
+                        title=dict(font=dict(color='#888888')),
+                    ),
+                    
+                    margin=dict(l=60, r=20, t=10, b=50), # 边距
+                    hovermode='x unified', # 鼠标悬停时的交互模式
+                    height=380,
+                    showlegend=False
+                )
+                
+                # 平滑贝塞尔曲线 + 渐变填充（交易所级效果）
+                fig.update_traces(
+                    fill='tonexty',
+                    mode='lines',  # 只显示线条，不显示数据点
+                    line=dict(width=2.5),
+                    line_shape='spline',  # 关键：平滑贝塞尔曲线（交易所风格）
+                    fillcolor='rgba(76, 175, 80, 0.2)' if total_pnl >= 0 else 'rgba(255, 82, 82, 0.2)',
+                    line_color='#4CAF50' if total_pnl >= 0 else '#FF5252',
+                    hovertemplate='<b>%{x|%Y-%m-%d %H:%M}</b><br>累计盈亏: $%{y:,.2f}<extra></extra>',
+                    hoverlabel=dict(
+                        bgcolor='rgba(30, 30, 30, 0.95)',
+                        bordercolor='#555555',
+                        font_size=12,
+                        font_family='-apple-system, BlinkMacSystemFont, sans-serif'
+                    )
+                )
+                
+                # 添加0轴线（如果数据跨越0线）
+                if chart_df['cumulative_pnl'].min() < 0 < chart_df['cumulative_pnl'].max():
+                    fig.add_hline(
+                        y=0,
+                        line_dash="dash",
+                        line_color="#888888",
+                        line_width=1.5,
+                        opacity=0.6,
+                        annotation_text="盈亏分界线",
+                        annotation_position="right",
+                        annotation_font_size=10,
+                        annotation_font_color="#888888"
+                    )
+                
+                # 显示图表（隐藏工具栏，保持简洁）
+                st.plotly_chart(fig, use_container_width=True, config={
+                    'displayModeBar': False,
+                    'displaylogo': False
+                })
+            
+            st.markdown("---")
+            
+            # ======================================================================
             # 交易列表和复盘区域 (左列表，右详情)
             # ======================================================================
             st.markdown("### 📋 交易列表 & 复盘")
