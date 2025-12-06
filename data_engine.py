@@ -29,6 +29,7 @@ class TradeDataEngine:
                 pnl REAL,
                 api_key_tag TEXT, 
                 notes TEXT,
+                strategy TEXT,
                 ai_analysis TEXT,
                 UNIQUE(id, api_key_tag)
             )
@@ -233,16 +234,35 @@ class TradeDataEngine:
     # ===========================
     #  📝 笔记与 AI 数据更新
     # ===========================
-    def update_trade_note(self, trade_id, note_text, api_key=None):
-        """更新交易笔记"""
+    def update_trade_note(self, trade_id, note_text, strategy_text=None, api_key=None):
+        """更新交易笔记和策略"""
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
         try:
+            # 如果表中有strategy列则更新，否则只更新notes（向后兼容）
             if api_key:
                 key_tag = api_key.strip()[-4:]
-                c.execute("UPDATE trades SET notes = ? WHERE id = ? AND api_key_tag = ?", (note_text, trade_id, key_tag))
+                if strategy_text is not None:
+                    # 尝试更新strategy字段（如果存在）
+                    try:
+                        c.execute("UPDATE trades SET notes = ?, strategy = ? WHERE id = ? AND api_key_tag = ?", 
+                                (note_text, strategy_text, trade_id, key_tag))
+                    except sqlite3.OperationalError:
+                        # 如果strategy列不存在，只更新notes
+                        c.execute("UPDATE trades SET notes = ? WHERE id = ? AND api_key_tag = ?", 
+                                (note_text, trade_id, key_tag))
+                else:
+                    c.execute("UPDATE trades SET notes = ? WHERE id = ? AND api_key_tag = ?", 
+                            (note_text, trade_id, key_tag))
             else:
-                c.execute("UPDATE trades SET notes = ? WHERE id = ?", (note_text, trade_id))
+                if strategy_text is not None:
+                    try:
+                        c.execute("UPDATE trades SET notes = ?, strategy = ? WHERE id = ?", 
+                                (note_text, strategy_text, trade_id))
+                    except sqlite3.OperationalError:
+                        c.execute("UPDATE trades SET notes = ? WHERE id = ?", (note_text, trade_id))
+                else:
+                    c.execute("UPDATE trades SET notes = ? WHERE id = ?", (note_text, trade_id))
             conn.commit()
             return True
         except Exception as e:

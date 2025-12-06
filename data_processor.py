@@ -68,15 +68,18 @@ def process_trades_to_rounds(df):
                     end_time = timestamp
                     duration_minutes = (end_time - start_time) / 1000 / 60
                     
-                    # 提取笔记
+                    # 提取笔记、策略和AI分析
                     note_content = ""
+                    strategy_content = ""
                     ai_content = ""
                     match_row = df[df['id'] == open_id]
                     if not match_row.empty:
                         # 数据库读出来如果是 None 要转为空字符串
                         note_val = match_row.iloc[0].get('notes')
+                        strategy_val = match_row.iloc[0].get('strategy')
                         ai_val = match_row.iloc[0].get('ai_analysis')
                         note_content = note_val if note_val else ""
+                        strategy_content = strategy_val if strategy_val else ""
                         ai_content = ai_val if ai_val else ""
 
                     rounds.append({

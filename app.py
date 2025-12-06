@@ -16,29 +16,91 @@ COLORS = {
     "text": "#EAECEF", "grid": "#2B2F36"
 }
 
-# 注入 CSS：修复顶部遮挡，美化界面
+# 注入 CSS：专业深色模式 (交易员风格)
 st.markdown(f"""
 <style>
-    .stApp {{ background-color: {COLORS['bg']}; }}
+    /* 深色模式基础 */
+    .stApp {{ background-color: #121212; }}
     
     /* 修复顶部遮挡问题 */
     .block-container {{ padding-top: 3rem; padding-bottom: 2rem; }}
     
-    /* 列表选中态 */
-    div[data-testid="stDataFrame"] {{ border: 1px solid {COLORS['grid']}; }}
+    /* 专业深色卡片 */
+    .ios-stat-card {{
+        background: #1E1E1E;
+        border: 1px solid #333333;
+        border-radius: 16px;
+        padding: 24px;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+        margin-bottom: 16px;
+        transition: transform 0.2s, box-shadow 0.2s;
+    }}
     
-    /* 文本框美化 */
-    .stTextArea textarea {{ background-color: #161A1E; color: #EEE; border: 1px solid #333; }}
+    .ios-stat-card:hover {{
+        transform: translateY(-2px);
+        box-shadow: 0 6px 25px rgba(0,0,0,0.7);
+        border-color: #444;
+    }}
     
-    /* 侧边栏背景 */
-    section[data-testid="stSidebar"] {{ background-color: #161A1E; }}
+    .ios-label {{
+        font-size: 12px;
+        color: #888888;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.8px;
+        margin-bottom: 8px;
+    }}
     
-    /* Metric 卡片美化 */
-    div[data-testid="stMetric"] {{
-        background-color: {COLORS['card_bg']};
-        padding: 10px;
-        border-radius: 5px;
-        border: 1px solid {COLORS['grid']};
+    .ios-value {{
+        font-size: 32px;
+        font-weight: 700;
+        color: #FFFFFF;
+        letter-spacing: -0.5px;
+    }}
+    
+    /* 荧光绿/红，带微光效果 */
+    .ios-value.green {{ 
+        color: #4CAF50 !important; 
+        text-shadow: 0 0 10px rgba(76, 175, 80, 0.2);
+    }}
+    .ios-value.red {{ 
+        color: #FF5252 !important; 
+        text-shadow: 0 0 10px rgba(255, 82, 82, 0.2);
+    }}
+    
+    /* 列表选中态 - 深色模式 */
+    div[data-testid="stDataFrame"] {{ 
+        border: 1px solid #333333; 
+        border-radius: 16px;
+        overflow: hidden;
+        background-color: #1E1E1E;
+    }}
+    
+    /* 文本框美化 - 深色 */
+    .stTextArea textarea {{ 
+        background-color: #1E1E1E; 
+        color: #E0E0E0; 
+        border: 1px solid #333;
+    }}
+    
+    /* 侧边栏背景 - 深色 */
+    section[data-testid="stSidebar"] {{ 
+        background-color: #1A1A1A;
+    }}
+    
+    /* 主文本颜色 - 深色模式 */
+    .stMarkdown, p, div {{
+        color: #E0E0E0;
+    }}
+    
+    /* 标题颜色 */
+    h1, h2, h3 {{
+        color: #FFFFFF;
+    }}
+    
+    /* 分割线颜色 */
+    hr, .stDivider {{
+        border-color: #333333;
     }}
 </style>
 """, unsafe_allow_html=True)
@@ -126,6 +188,140 @@ if selected_key:
         if rounds_df.empty:
             st.warning("🤔 有数据，但没有检测到完整的【开仓-平仓】闭环。请确认是否有已平仓的订单。")
         else:
+            # ======================================================================
+            # iOS 风格数据看板 (Bento Grid)
+            # ======================================================================
+            st.markdown("### 📊 Dashboard")
+            
+            # --- 修复后的核心计算逻辑 ---
+            total_trades = len(rounds_df)
+            total_pnl = rounds_df['net_pnl'].sum()
+            
+            # 统计盈亏
+            win_count = len(rounds_df[rounds_df['net_pnl'] > 0])
+            loss_count = len(rounds_df[rounds_df['net_pnl'] < 0])
+            
+            # 收集所有盈亏值用于计算最佳/最差
+            pnl_list = rounds_df['net_pnl'].tolist()
+            
+            # 计算总盈利和总亏损金额
+            win_trades = rounds_df[rounds_df['net_pnl'] > 0]
+            loss_trades = rounds_df[rounds_df['net_pnl'] < 0]
+            total_win_amt = win_trades['net_pnl'].sum() if len(win_trades) > 0 else 0.0
+            total_loss_amt = abs(loss_trades['net_pnl'].sum()) if len(loss_trades) > 0 else 0.0
+            
+            # 1. 胜率
+            win_rate = round((win_count / total_trades * 100), 1) if total_trades > 0 else 0
+            
+            # 2. 盈亏比 (修复：避免除以0，全胜时显示∞)
+            avg_win = total_win_amt / win_count if win_count > 0 else 0
+            if loss_count > 0:
+                avg_loss = total_loss_amt / loss_count
+                rr_ratio = round(avg_win / avg_loss, 2)
+            else:
+                rr_ratio = "∞"  # 全胜时显示无穷大
+            
+            # 3. 最佳/最差交易 (修复：确保正确显示)
+            if pnl_list:
+                best_trade = max(pnl_list)
+                worst_trade = min(pnl_list)
+            else:
+                best_trade = 0
+                worst_trade = 0
+            
+            # 格式化总盈亏
+            pnl_sign = "+" if total_pnl > 0 else ""
+            total_pnl_display = f"{pnl_sign}{total_pnl:,.2f}"
+            
+            # iOS 风格卡片布局 (2x2 网格)
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # 总盈亏卡片 (大卡片，跨两列)
+                pnl_color_class = "green" if total_pnl >= 0 else "red"
+                st.markdown(f"""
+                <div class="ios-stat-card">
+                    <div class="ios-label">Total PnL (总盈亏)</div>
+                    <div class="ios-value {pnl_color_class}">${total_pnl_display}</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with col2:
+                col2a, col2b = st.columns(2)
+                with col2a:
+                    st.markdown(f"""
+                    <div class="ios-stat-card">
+                        <div class="ios-label">Win Rate (胜率)</div>
+                        <div class="ios-value">{win_rate}%</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                with col2b:
+                    st.markdown(f"""
+                    <div class="ios-stat-card">
+                        <div class="ios-label">Avg R:R (盈亏比)</div>
+                        <div class="ios-value">{rr_ratio}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+            
+            # 第二行：交易总数和平均持仓时间
+            col3, col4, col5 = st.columns(3)
+            with col3:
+                st.markdown(f"""
+                <div class="ios-stat-card">
+                    <div class="ios-label">Trades (总数)</div>
+                    <div class="ios-value">{total_trades}</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with col4:
+                # 计算平均持仓时间（使用 duration_min 字段，更可靠）
+                closed_trades = rounds_df[rounds_df['status'] == 'Closed']
+                if not closed_trades.empty and 'duration_min' in closed_trades.columns:
+                    # 直接使用 duration_min 字段（已经是数字）
+                    avg_duration = round(closed_trades['duration_min'].mean(), 1)
+                    if avg_duration < 60:
+                        avg_duration_str = f"{int(avg_duration)}分钟"
+                    elif avg_duration < 1440:
+                        hours = int(avg_duration // 60)
+                        minutes = int(avg_duration % 60)
+                        avg_duration_str = f"{hours}小时{minutes}分钟"
+                    else:
+                        days = int(avg_duration // 1440)
+                        hours = int((avg_duration % 1440) // 60)
+                        avg_duration_str = f"{days}天{hours}小时"
+                else:
+                    avg_duration_str = "N/A"
+                
+                st.markdown(f"""
+                <div class="ios-stat-card">
+                    <div class="ios-label">Avg Duration (平均持仓)</div>
+                    <div class="ios-value" style="font-size: 20px;">{avg_duration_str}</div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with col5:
+                # 修复：正确显示最佳/最差，颜色根据正负值
+                best_color = "green" if best_trade > 0 else "red"
+                worst_color = "green" if worst_trade > 0 else "red"
+                st.markdown(f"""
+                <div class="ios-stat-card">
+                    <div class="ios-label">Best / Worst</div>
+                    <div class="ios-value" style="font-size: 18px;">
+                        <span class="{best_color}">${best_trade:.2f}</span>
+                        <span style="color: #444; margin: 0 6px;">|</span>
+                        <span class="{worst_color}">${worst_trade:.2f}</span>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            st.markdown("---")
+            
+            # ======================================================================
+            # 交易列表和复盘区域 (左列表，右详情)
+            # ======================================================================
+            st.markdown("### 📋 交易列表 & 复盘")
+            
             # --- 布局：左 40% 列表，右 60% 详情 ---
             col_list, col_detail = st.columns([4, 6])
             
@@ -160,45 +356,106 @@ if selected_key:
                     idx = selection.selection.rows[0]
                     trade = show_df.iloc[idx]
                     
-                    # 1. 顶部数据卡片
-                    st.subheader(f"🔍 {trade['symbol']} 复盘详情")
+                    # 1. 顶部大标题卡片 (iOS风格)
+                    pnl_color_class = "green" if trade['net_pnl'] >= 0 else "red"
+                    pnl_display = f"+{trade['net_pnl']:.2f}" if trade['net_pnl'] > 0 else f"{trade['net_pnl']:.2f}"
                     
-                    # 动态颜色
-                    pnl_color = COLORS['up'] if trade['net_pnl'] > 0 else COLORS['down']
+                    st.markdown(f"""
+                    <div style='background: #1E1E1E; border: 1px solid #333; border-radius: 20px; padding: 30px; text-align: center; margin-bottom: 24px;'>
+                        <div style='font-size: 24px; font-weight: 700; color: #FFF; margin-bottom: 10px;'>{trade['symbol']}</div>
+                        <span style='display: inline-block; padding: 4px 12px; border-radius: 6px; font-size: 12px; font-weight: bold; 
+                            background: {'rgba(76, 175, 80, 0.15)' if 'Long' in trade['direction'] else 'rgba(255, 82, 82, 0.15)'}; 
+                            color: {'#66BB6A' if 'Long' in trade['direction'] else '#FF5252'};'>
+                            {trade['direction']}
+                        </span>
+                        <div style='font-size: 42px; font-weight: 800; color: {'#4CAF50' if trade['net_pnl'] >= 0 else '#FF5252'}; 
+                            margin: 15px 0; letter-spacing: -1px;'>
+                            ${pnl_display}
+                        </div>
+                        <div style='color: #666; font-size: 13px;'>{trade['close_date_str']}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
                     
-                    # 第一行核心指标
-                    c1, c2, c3 = st.columns(3)
-                    c1.metric("净盈亏 (Net PnL)", f"${trade['net_pnl']}", delta="含手续费")
-                    c2.metric("方向", trade['direction'])
-                    c3.metric("持仓时长", trade['duration_str'])
+                    # 2. 信息网格 (iOS风格卡片)
+                    st.markdown("""
+                    <style>
+                    .info-card-custom {
+                        background: #1E1E1E;
+                        border: 1px solid #333;
+                        border-radius: 16px;
+                        padding: 16px;
+                    }
+                    </style>
+                    """, unsafe_allow_html=True)
+                    
+                    info_col1, info_col2 = st.columns(2)
+                    with info_col1:
+                        st.markdown(f"""
+                        <div class="info-card-custom">
+                            <div style='font-size: 12px; color: #888; text-transform: uppercase; margin-bottom: 4px;'>开仓时间</div>
+                            <div style='font-size: 16px; color: #FFF; font-weight: 600;'>{trade['open_date_str']}</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        st.markdown("<br>", unsafe_allow_html=True)
+                        st.markdown(f"""
+                        <div class="info-card-custom">
+                            <div style='font-size: 12px; color: #888; text-transform: uppercase; margin-bottom: 4px;'>持仓时长</div>
+                            <div style='font-size: 16px; color: #FFF; font-weight: 600;'>{trade['duration_str']}</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                    
+                    with info_col2:
+                        st.markdown(f"""
+                        <div class="info-card-custom">
+                            <div style='font-size: 12px; color: #888; text-transform: uppercase; margin-bottom: 4px;'>平仓时间</div>
+                            <div style='font-size: 16px; color: #FFF; font-weight: 600;'>{trade['close_date_str']}</div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        st.markdown("<br>", unsafe_allow_html=True)
+                        st.markdown(f"""
+                        <div class="info-card-custom">
+                            <div style='font-size: 12px; color: #888; text-transform: uppercase; margin-bottom: 4px;'>手续费</div>
+                            <div style='font-size: 16px; color: #FFF; font-weight: 600;'>${trade['total_fee']:.2f}</div>
+                        </div>
+                        """, unsafe_allow_html=True)
                     
                     st.markdown("---")
                     
-                    # 第二行辅助信息
-                    c4, c5, c6, c7 = st.columns(4)
-                    c4.markdown(f"<small style='color:#888'>开仓时间</small><br>{trade['open_date_str']}", unsafe_allow_html=True)
-                    c5.markdown(f"<small style='color:#888'>平仓时间</small><br>{trade['close_date_str']}", unsafe_allow_html=True)
-                    c6.markdown(f"<small style='color:#888'>手续费</small><br>${trade['total_fee']}", unsafe_allow_html=True)
-                    c7.markdown(f"<small style='color:#888'>操作次数</small><br>{trade['trade_count']} 次", unsafe_allow_html=True)
+                    # 2. 复盘工作台 (核心功能)
+                    st.markdown("### 📝 Trade Review (复盘工作台)")
                     
-                    st.divider()
-                    
-                    # 2. 笔记模块 (核心功能)
-                    st.markdown("### 📝 交易笔记 (Journal)")
-                    
-                    # 从数据库重新读取最新笔记 (确保实时性)
-                    # trade['round_id'] 是开仓单的 ID
-                    current_note_db = raw_df[raw_df['id'] == trade['round_id']].iloc[0].get('notes', '')
+                    # 从数据库重新读取最新数据 (确保实时性)
+                    trade_row = raw_df[raw_df['id'] == trade['round_id']].iloc[0]
+                    current_note_db = trade_row.get('notes', '')
+                    current_strategy_db = trade_row.get('strategy', '')
                     if pd.isna(current_note_db): current_note_db = ""
+                    if pd.isna(current_strategy_db): current_strategy_db = ""
                     
-                    user_note = st.text_area("记录你的心理状态、入场理由、离场反思...", value=current_note_db, height=200)
+                    # 策略输入框
+                    st.markdown("**Strategy / Setup (策略/依据)**")
+                    st.caption("例如：趋势突破、EMA回调、支撑位反弹...")
+                    user_strategy = st.text_input("策略名称", value=current_strategy_db, placeholder="输入你的交易策略", label_visibility="collapsed")
                     
-                    if st.button("💾 保存笔记", use_container_width=True):
-                        # 调用后端保存
-                        engine.update_trade_note(trade['round_id'], user_note)
-                        st.toast("✅ 笔记已保存！")
-                        time.sleep(0.5)
-                        st.rerun()
+                    st.markdown("<br>", unsafe_allow_html=True)
+                    
+                    # 详细笔记输入框
+                    st.markdown("**Detailed Notes (详细分析 & 心理状态)**")
+                    st.caption("记录入场理由、止损执行情况、以及当时的情绪...")
+                    user_note = st.text_area("复盘笔记", value=current_note_db, height=250, 
+                                            placeholder="记录你的心理状态、入场理由、离场反思...", label_visibility="collapsed")
+                    
+                    # 保存按钮区域
+                    col_save1, col_save2, col_save3 = st.columns([1, 2, 1])
+                    with col_save2:
+                        if st.button("💾 保存复盘", use_container_width=True, type="primary"):
+                            # 调用后端保存（同时保存策略和笔记）
+                            success = engine.update_trade_note(trade['round_id'], user_note, user_strategy, selected_key)
+                            if success:
+                                st.success("✅ 复盘已保存！")
+                                time.sleep(0.5)
+                                st.rerun()
+                            else:
+                                st.error("❌ 保存失败，请重试")
 
                     # 3. AI 导师区域
                     st.divider()
