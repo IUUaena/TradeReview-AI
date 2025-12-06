@@ -1,165 +1,262 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-import time  # <--- 之前漏了这句，导致报错
+import plotly.graph_objects as go
+import time
+from datetime import datetime
 from data_engine import TradeDataEngine
 
-# 1. 页面配置
-st.set_page_config(page_title="TradeReview AI", page_icon="📈", layout="wide")
+# -----------------------------------------------------------------------------
+# 1. 页面配置：宽屏 + 深色模式兼容
+# -----------------------------------------------------------------------------
+st.set_page_config(page_title="TradeReview Pro", page_icon="🦅", layout="wide")
+
+# 自定义 CSS 让界面更紧凑、更像专业仪表盘
+st.markdown("""
+<style>
+    .stMetric {
+        background-color: #1E1E1E;
+        padding: 15px;
+        border-radius: 10px;
+        border: 1px solid #333;
+    }
+    .stMetric:hover {
+        border: 1px solid #555;
+    }
+    div[data-testid="stExpander"] {
+        border: none;
+        box-shadow: none;
+        background-color: #161616;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 engine = TradeDataEngine()
 
-# 2. 侧边栏：账户与同步管理
+# -----------------------------------------------------------------------------
+# 2. 核心计算逻辑：引入专业交易员指标
+# -----------------------------------------------------------------------------
+def calculate_advanced_stats(df):
+    if df.empty: return {}
+    
+    # 基础数据
+    df['pnl'] = pd.to_numeric(df['pnl'])
+    total_trades = len(df)
+    total_pnl = df['pnl'].sum()
+    
+    # 胜负统计
+    wins = df[df['pnl'] > 0]
+    losses = df[df['pnl'] <= 0]
+    win_count = len(wins)
+    loss_count = len(losses)
+    
+    win_rate = (win_count / total_trades * 100) if total_trades > 0 else 0
+    
+    # 金额统计
+    gross_profit = wins['pnl'].sum()
+    gross_loss = abs(losses['pnl'].sum())
+    
+    # 盈亏比 (Profit Factor) = 总盈利 / 总亏损
+    profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else 999.0
+    
+    # 平均单笔
+    avg_win = wins['pnl'].mean() if win_count > 0 else 0
+    avg_loss = losses['pnl'].mean() if loss_count > 0 else 0
+    # 盈亏风险比 (Reward/Risk Ratio)
+    risk_reward_ratio = abs(avg_win / avg_loss) if avg_loss != 0 else 0
+
+    return {
+        "Total PnL": total_pnl,
+        "Win Rate": win_rate,
+        "Trades": total_trades,
+        "Profit Factor": profit_factor,
+        "Avg Win": avg_win,
+        "Avg Loss": avg_loss,
+        "R:R Ratio": risk_reward_ratio
+    }
+
+def process_chart_data(df):
+    """预处理图表数据"""
+    df = df.sort_values('timestamp')
+    df['date'] = pd.to_datetime(df['timestamp'], unit='ms')
+    df['cumulative_pnl'] = df['pnl'].cumsum()
+    # 转换日期为 "YYYY-MM-DD" 格式用于热力图聚合
+    df['day_str'] = df['date'].dt.strftime('%Y-%m-%d')
+    return df
+
+# -----------------------------------------------------------------------------
+# 3. 侧边栏：极简风格
+# -----------------------------------------------------------------------------
 with st.sidebar:
-    st.header("👤 账户管理")
+    st.title("🦅 TradeReview Pro")
+    st.markdown("---")
     
-    # --- A. 账户选择器 ---
+    # 账户选择器
     accounts_df = engine.get_all_accounts()
-    
-    selected_alias = None
-    selected_key = None
-    selected_secret = None
-    
+    selected_key, selected_secret, selected_alias = None, None, None
+
     if not accounts_df.empty:
-        # 创建一个字典用于映射：别名 -> Key
         alias_map = dict(zip(accounts_df['alias'], accounts_df['api_key']))
-        
-        # 下拉菜单选择
         selected_alias = st.selectbox("当前账户", accounts_df['alias'])
-        
-        # 获取对应的 Key 和 Secret (用于后续操作)
         if selected_alias:
             selected_key = alias_map[selected_alias]
             selected_secret = engine.get_credentials(selected_key)
-            st.success(f"已连接: {selected_alias}")
     else:
-        st.info("👈 暂无账户，请先添加")
+        st.warning("请先添加账户")
 
-    # --- B. 添加/更新账户 (折叠菜单) ---
-    with st.expander("➕ 添加 / 更新账户"):
-        new_alias = st.text_input("账户备注 (例如: 币安大号)")
-        new_key = st.text_input("API Key", type="password")
-        new_secret = st.text_input("Secret Key", type="password")
+    # 折叠式菜单保持界面整洁
+    with st.expander("⚙️ 账户管理 / 同步"):
+        tab1, tab2 = st.tabs(["同步数据", "新增/删除"])
         
-        if st.button("💾 保存账户"):
-            success, msg = engine.save_api_key(new_key, new_secret, new_alias)
-            if success:
-                st.success(msg)
-                time.sleep(1) # 让提示停留1秒
-                st.rerun()    # 刷新页面
+        with tab1:
+            if selected_key:
+                mode = st.radio("模式", ["🚀 快速 (7天)", "⛏️ 深度 (1年)"])
+                coins = ""
+                if "深度" in mode:
+                    coins = st.text_input("币种 (BTC, ETH)")
+                
+                # 进度条
+                p_bar = st.progress(0)
+                status = st.empty()
+                def ui_callback(msg, val):
+                    status.text(msg)
+                    p_bar.progress(val)
+
+                if st.button("开始同步", use_container_width=True):
+                    api_mode = 'recent' if "快速" in mode else 'deep'
+                    with st.spinner("Connecting..."):
+                        msg, _ = engine.fetch_and_save(selected_key, selected_secret, api_mode, coins, ui_callback)
+                        if "成功" in msg: 
+                            st.success("同步完成")
+                            time.sleep(1)
+                            st.rerun()
+                        else: st.error(msg)
             else:
-                st.error(msg)
+                st.info("请先选择账户")
 
-    st.markdown("---")
-
-    # --- C. 同步操作 (仅当选中账户时显示) ---
-    if selected_key and selected_secret:
-        st.subheader("🔄 数据同步")
-        
-        mode = st.radio(
-            "选择同步模式", 
-            ["🚀 快速扫描 (最近7天)", "⛏️ 深度挖掘 (最近1年)"],
-            captions=["扫描所有合约，适合日常更新。", "需要输入币种，倒序查找，适合补录。"]
-        )
-        
-        target_coins = ""
-        if "深度" in mode:
-            st.info("💡 深度模式：必须指定币种")
-            target_coins = st.text_input("输入币种 (如 BTC, ETH, SOL)")
-        
-        # 进度条UI
-        p_bar = st.progress(0)
-        status_text = st.empty()
-        
-        def update_ui(msg, val):
-            status_text.text(msg)
-            p_bar.progress(val)
-
-        if st.button("开始同步"):
-            api_mode = 'recent' if "快速" in mode else 'deep'
-            with st.spinner("正在连接交易所..."):
-                msg, count = engine.fetch_and_save(
-                    selected_key, selected_secret, 
-                    mode=api_mode, 
-                    target_coins_str=target_coins, 
-                    progress_callback=update_ui
-                )
-                
-                p_bar.empty()
-                status_text.empty()
-                
-                if "成功" in msg:
-                    st.balloons()
-                    st.success(f"🎉 同步完成！新增 {count} 条记录。")
-                    time.sleep(1)
+        with tab2:
+            n_alias = st.text_input("新账户名")
+            n_key = st.text_input("API Key", type="password")
+            n_sec = st.text_input("Secret", type="password")
+            if st.button("保存", use_container_width=True):
+                ok, m = engine.save_api_key(n_key, n_sec, n_alias)
+                if ok: st.rerun()
+                else: st.error(m)
+            
+            st.markdown("---")
+            if st.button("删除当前账户", type="primary", use_container_width=True):
+                if selected_key:
+                    engine.delete_account_full(selected_key)
                     st.rerun()
-                else:
-                    st.error(msg)
-        
-        st.markdown("---")
-        
-        # --- D. 危险区域 (删除当前账户) ---
-        with st.expander("⚠️ 危险区域"):
-            st.warning(f"确定要删除【{selected_alias}】吗？")
-            st.markdown("这将删除：\n1. 本地保存的 Key\n2. 该账户所有的历史交易记录")
-            if st.button("🗑️ 确认删除当前账户", type="primary"):
-                n = engine.delete_account_full(selected_key)
-                st.success(f"已删除账户及 {n} 条关联交易记录。")
-                time.sleep(1)
-                st.rerun()
 
-# 3. 主界面内容
-st.title("📈 交易复盘 AI 驾驶舱")
+# -----------------------------------------------------------------------------
+# 4. 主界面：仪表盘布局
+# -----------------------------------------------------------------------------
 
 if selected_key:
-    # 加载选中账户的数据
-    df = engine.load_trades(selected_key)
+    # 加载数据
+    raw_df = engine.load_trades(selected_key)
     
-    if df.empty:
-        st.info(f"👋 欢迎，**{selected_alias}**！暂无数据，请点击左侧“开始同步”。")
+    if raw_df.empty:
+        st.info("📊 暂无数据，请在侧边栏进行同步。")
     else:
-        # 核心指标
-        pnl = df['pnl'].sum()
-        win_trades = len(df[df['pnl']>0])
-        win_rate = (win_trades / len(df) * 100) if len(df) > 0 else 0
+        stats = calculate_advanced_stats(raw_df)
+        df = process_chart_data(raw_df)
+
+        # --- 第一排：关键 KPI 卡片 ---
+        col1, col2, col3, col4, col5 = st.columns(5)
         
-        c1, c2, c3 = st.columns(3)
-        c1.metric("💰 总盈亏 (USDT)", f"{pnl:,.2f}", delta=f"{pnl:,.2f}")
-        c2.metric("🎯 胜率", f"{win_rate:.1f}%")
-        c3.metric("📊 交易笔数", len(df))
+        # 使用 Delta 箭头展示正负
+        col1.metric("💰 总盈亏", f"${stats['Total PnL']:,.2f}", delta=f"{stats['Total PnL']:,.2f}")
+        col2.metric("🎯 胜率", f"{stats['Win Rate']:.1f}%")
         
+        # 盈亏比颜色逻辑
+        pf = stats['Profit Factor']
+        pf_delta = "优秀" if pf > 1.5 else "需努力"
+        col3.metric("⚖️ 盈亏比 (PF)", f"{pf:.2f}", delta=pf_delta, delta_color="normal" if pf > 1.2 else "inverse")
+        
+        col4.metric("📈 平均盈利", f"${stats['Avg Win']:.2f}")
+        col5.metric("📉 平均亏损", f"${stats['Avg Loss']:.2f}")
+
         st.markdown("---")
+
+        # --- 第二排：图表视窗 (使用 Tabs 分离视图) ---
+        chart_tab1, chart_tab2, chart_tab3 = st.tabs(["📈 资金曲线 (Equity)", "📅 日历热力图 (Heatmap)", "📊 盈亏分布"])
+
+        with chart_tab1:
+            # 资金曲线：使用面积图，更美观
+            fig_equity = px.area(
+                df, x='date', y='cumulative_pnl', 
+                title=f"{selected_alias} 资金增长曲线",
+                color_discrete_sequence=['#00FF00' if stats['Total PnL'] > 0 else '#FF0000']
+            )
+            fig_equity.update_layout(
+                xaxis_title="", yaxis_title="累计盈亏 (USDT)",
+                plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)',
+                hovermode="x unified"
+            )
+            st.plotly_chart(fig_equity, use_container_width=True)
+
+        with chart_tab2:
+            # 日历热力图：计算每日盈亏
+            daily_pnl = df.groupby('day_str')['pnl'].sum().reset_index()
+            
+            # 使用柱状图模拟热力分布 (Streamlit 原生暂无好的 Calendar 组件，用 Bar 代替最直观)
+            # 绿色代表当日盈利，红色代表当日亏损
+            colors = ['#FF4B4B' if val < 0 else '#00C853' for val in daily_pnl['pnl']]
+            
+            fig_heat = go.Figure(data=[go.Bar(
+                x=daily_pnl['day_str'],
+                y=daily_pnl['pnl'],
+                marker_color=colors
+            )])
+            fig_heat.update_layout(
+                title="每日盈亏表现 (Daily PnL)",
+                xaxis_title="日期", yaxis_title="当日盈亏",
+                plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)'
+            )
+            st.plotly_chart(fig_heat, use_container_width=True)
+
+        with chart_tab3:
+            # 盈亏分布直方图
+            fig_dist = px.histogram(
+                df, x="pnl", nbins=50, 
+                title="盈亏分布 (PnL Distribution)",
+                color_discrete_sequence=['#29B5E8']
+            )
+            fig_dist.update_layout(plot_bgcolor='rgba(0,0,0,0)', paper_bgcolor='rgba(0,0,0,0)')
+            # 标记 0轴
+            fig_dist.add_vline(x=0, line_width=2, line_dash="dash", line_color="white")
+            st.plotly_chart(fig_dist, use_container_width=True)
+
+        # --- 第三排：详细数据列表 (美化表格) ---
+        st.subheader("📝 交易流水")
         
-        # 图表
-        st.subheader(f"📉 {selected_alias} 资金曲线")
-        df_chart = df.sort_values('timestamp')
-        df_chart['cumulative_pnl'] = df_chart['pnl'].cumsum()
-        df_chart['date'] = pd.to_datetime(df_chart['timestamp'], unit='ms')
-        
-        fig = px.line(df_chart, x='date', y='cumulative_pnl')
-        fig.update_traces(line_color='#00FF00' if pnl>=0 else '#FF0000')
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # 列表
-        st.subheader("📝 详细记录")
-        sel_coin = st.multiselect("筛选币种", df['symbol'].unique())
-        df_show = df[df['symbol'].isin(sel_coin)] if sel_coin else df
-        
+        # 格式化表格
         st.dataframe(
-            df_show[['datetime', 'symbol', 'side', 'price', 'amount', 'pnl', 'fee']],
-            use_container_width=True, 
-            height=500,
-            column_config={"pnl": st.column_config.NumberColumn("盈亏", format="$%.2f")}
+            df[['date', 'symbol', 'side', 'price', 'amount', 'pnl', 'fee']],
+            use_container_width=True,
+            height=400,
+            column_config={
+                "date": "时间",
+                "symbol": "币种",
+                "side": st.column_config.TextColumn("方向", help="Long/Short"),
+                "pnl": st.column_config.NumberColumn(
+                    "盈亏 (PnL)", 
+                    format="$%.2f",
+                    # 加上进度条视觉效果，一眼看出大肉和大面
+                    help="盈亏金额" 
+                ),
+            }
         )
 
 else:
-    # 引导页
+    # 极简引导页
     st.markdown("""
-    ### 👋 欢迎使用 TradeReview AI
-    
-    请在左侧侧边栏 **添加一个账户** 以开始。
-    
-    **功能特点：**
-    * 🔐 **多账户管理**：支持保存多个 API Key，随时切换。
-    * 🏷️ **备注功能**：给账户起个好记的名字。
-    * 🗑️ **数据隔离**：删除账户时，该账户的数据会一并销毁，不留痕迹。
-    """)
+    <div style='text-align: center; margin-top: 100px;'>
+        <h1>🦅 TradeReview Pro</h1>
+        <p style='color: gray;'>专业的 AI 交易复盘工作台</p>
+        <br>
+        <p>👈 请在左侧侧边栏添加 API Key 开始旅程</p>
+    </div>
+    """, unsafe_allow_html=True)
