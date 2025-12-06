@@ -27,7 +27,7 @@ if page == "📊 仪表盘":
 
 # --- 页面 2: 数据同步 ---
 elif page == "🔄 数据同步":
-    st.title("🔄 全量数据同步")
+    st.title("🔄 全量历史同步")
     
     keys_df = db.get_all_keys()
     
@@ -35,28 +35,29 @@ elif page == "🔄 数据同步":
         st.warning("⚠️ 请先去【设置 & API】页面配置 Binance API。")
     else:
         st.info("""
-        本次更新包含：
+        本次更新已启用【时光机】功能：
 
-        1. **全币种扫描**：自动检测币安所有 USDT 合约（约 200+ 个）。
+        1. **时间范围**：默认扫描过去 **12 个月** 的数据。
 
-        2. **深度获取**：单次最大获取 1000 条记录。
+        2. **覆盖范围**：扫描所有 USDT 合约。
 
-        ⚠️ 注意：由于需要扫描所有币种，过程可能需要 1-3 分钟，请耐心等待，不要关闭页面。
+        ⚠️ 耗时预警：扫描一年的数据可能需要 2-5 分钟，请务必耐心等待！
 
         """)
         
         selected_exchange = st.selectbox("选择要同步的账户", keys_df['exchange_name'])
         
-        if st.button("🚀 开始全量扫描"):
+        # 增加一个时间选择（可选，暂定默认12个月）
+        months = st.slider("回溯月份数", min_value=1, max_value=24, value=12)
+        
+        if st.button("🚀 开始全量历史扫描"):
             key_info = db.get_api_key(selected_exchange)
             if key_info:
                 api_key, api_secret = key_info
                 
-                # 创建一个进度条容器
                 progress_bar = st.progress(0)
-                status_text = st.empty() # 用来显示文字状态
+                status_text = st.empty()
                 
-                # 定义回调函数，传给后端用来更新前端
                 def update_progress(msg, value):
                     status_text.text(msg)
                     progress_bar.progress(value)
@@ -64,17 +65,16 @@ elif page == "🔄 数据同步":
                 import exchange_api
                 import sqlite3
                 
-                # 开始跑！
-                df, msg = exchange_api.get_binance_futures_history(api_key, api_secret, progress_callback=update_progress)
+                # 传入用户选择的月份
+                df, msg = exchange_api.get_binance_futures_history(api_key, api_secret, 
+                                                                 progress_callback=update_progress,
+                                                                 months_back=months)
                 
-                # 完成后清理进度条
                 progress_bar.empty()
                 status_text.empty()
-
                 if df is not None:
-                    st.success(f"✅ 扫描完成！共抓取到 {len(df)} 笔交易。")
+                    st.success(f"✅ 扫描完成！共抓取到 {len(df)} 笔历史交易。")
                     
-                    # 存入数据库
                     conn = sqlite3.connect(db.DB_NAME)
                     cursor = conn.cursor()
                     count = 0
@@ -96,13 +96,8 @@ elif page == "🔄 数据同步":
                     conn.commit()
                     conn.close()
                     
-                    if count > 0:
-                        st.balloons()
-                        st.success(f"成功入库 {count} 条新记录！请前往【仪表盘】查看。")
-                    else:
-                        st.warning("虽然抓取到了数据，但数据库里似乎已经都有了（没有新增）。")
-                    
-                    st.write("数据预览：")
+                    st.balloons()
+                    st.success(f"数据库新增 {count} 条记录！请去【仪表盘】查看。")
                     st.dataframe(df)
                 else:
                     st.error(f"❌ {msg}")
