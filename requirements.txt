@@ -1,7 +1,6 @@
 streamlit
-pandas
-plotly
 ccxt
+pandas
+openpyxl
+plotly
 openai
-sqlalchemy
-
