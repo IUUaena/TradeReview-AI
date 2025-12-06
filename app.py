@@ -27,37 +27,36 @@ if page == "📊 仪表盘":
 
 # --- 页面 2: 数据同步 ---
 elif page == "🔄 数据同步":
-    st.title("🔄 全量历史同步")
+    st.title("🔄 交易数据同步")
     
     keys_df = db.get_all_keys()
     
     if keys_df.empty:
         st.warning("⚠️ 请先去【设置 & API】页面配置 Binance API。")
     else:
-        st.info("""
-        本次更新已启用【时光机】功能：
-
-        1. **时间范围**：默认扫描过去 **12 个月** 的数据。
-
-        2. **覆盖范围**：扫描所有 USDT 合约。
-
-        ⚠️ 耗时预警：扫描一年的数据可能需要 2-5 分钟，请务必耐心等待！
-
-        """)
+        selected_exchange = st.selectbox("选择账户", keys_df['exchange_name'])
         
-        selected_exchange = st.selectbox("选择要同步的账户", keys_df['exchange_name'])
+        st.divider()
         
-        # 增加一个时间选择（可选，暂定默认12个月）
-        months = st.slider("回溯月份数", min_value=1, max_value=24, value=12)
+        # 模式选择
+        mode = st.radio("选择同步模式", 
+                        ["🚀 快速扫描 (最近7天)", "⛏️ 深度挖掘 (过去1年)"],
+                        captions=["扫描所有币种，但仅限最近一周。能立刻找回你刚才看到的4条记录。", 
+                                  "突破时间限制！但因为太耗时，需要你指定币种。"])
         
-        if st.button("🚀 开始全量历史扫描"):
+        target_coins = ""
+        if "深度" in mode:
+            st.info("💡 只有指定具体的币种，才能进行按周切片的深度历史查询。")
+            target_coins = st.text_input("请输入你交易过的币种 (用逗号分隔，例如: BTC, ETH, SOL, PEPE)", value="BTC, ETH")
+        
+        if st.button("开始同步"):
             key_info = db.get_api_key(selected_exchange)
             if key_info:
                 api_key, api_secret = key_info
                 
+                # 准备 UI
                 progress_bar = st.progress(0)
                 status_text = st.empty()
-                
                 def update_progress(msg, value):
                     status_text.text(msg)
                     progress_bar.progress(value)
@@ -65,16 +64,20 @@ elif page == "🔄 数据同步":
                 import exchange_api
                 import sqlite3
                 
-                # 传入用户选择的月份
-                df, msg = exchange_api.get_binance_futures_history(api_key, api_secret, 
-                                                                 progress_callback=update_progress,
-                                                                 months_back=months)
+                # 判定模式参数
+                api_mode = "recent" if "快速" in mode else "deep"
+                
+                # 调用后端
+                df, msg = exchange_api.get_binance_data(api_key, api_secret, 
+                                                        mode=api_mode, 
+                                                        target_coins_str=target_coins,
+                                                        progress_callback=update_progress)
                 
                 progress_bar.empty()
                 status_text.empty()
+
                 if df is not None:
-                    st.success(f"✅ 扫描完成！共抓取到 {len(df)} 笔历史交易。")
-                    
+                    # 入库逻辑
                     conn = sqlite3.connect(db.DB_NAME)
                     cursor = conn.cursor()
                     count = 0
@@ -96,8 +99,13 @@ elif page == "🔄 数据同步":
                     conn.commit()
                     conn.close()
                     
-                    st.balloons()
-                    st.success(f"数据库新增 {count} 条记录！请去【仪表盘】查看。")
+                    if count > 0:
+                        st.balloons()
+                        st.success(f"🎉 成功同步！数据库新增 {count} 条记录。")
+                    else:
+                        st.warning("同步成功，但这些记录数据库里好像都已经有了。")
+                        
+                    st.write(f"本次获取到的原始记录 ({len(df)}条):")
                     st.dataframe(df)
                 else:
                     st.error(f"❌ {msg}")

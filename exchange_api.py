@@ -9,101 +9,145 @@ def safe_float(value, default=0.0):
         return float(value)
     except: return default
 
-def get_binance_futures_history(api_key, api_secret, progress_callback=None, months_back=12):
+def fetch_history_chunked(exchange, symbol, start_ts, end_ts):
     """
-    全量扫描：
-
-    1. 自动获取所有 USDT 合约。
-
-    2. 强制从指定时间（months_back）开始抓取，打破 7 天限制。
-
+    核心工具：突破 7 天限制的抓取器。
+    它会自动把时间切成 7 天一段，循环抓取。
     """
-    print("--- 启动全量历史扫描模式 ---")
+    all_trades = []
+    current_start = start_ts
     
-    # 1. 设定起始时间 (时光机)
-    # 默认为过去 12 个月。如果你交易很久了，可以把 12 改成 24 或 36
-    start_time = datetime.now() - timedelta(days=30 * months_back)
-    since_timestamp = int(start_time.timestamp() * 1000)
-    print(f"🗓️ 设定查询起始日期: {start_time.strftime('%Y-%m-%d')}")
+    # 7天的毫秒数
+    SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000
     
-    # 2. 初始化
+    while current_start < end_ts:
+        current_end = current_start + SEVEN_DAYS_MS
+        if current_end > end_ts:
+            current_end = end_ts
+            
+        # 打印一下正在查哪段时间（方便调试）
+        # start_str = datetime.fromtimestamp(current_start/1000).strftime('%Y-%m-%d')
+        # print(f"      🔍 扫描区间: {start_str} -> ...")
+        
+        try:
+            # 必须同时指定 startTime 和 endTime，且间隔 < 7天
+            trades = exchange.fetch_my_trades(symbol=symbol, since=current_start, limit=1000, params={'endTime': current_end})
+            if trades:
+                all_trades.extend(trades)
+                # print(f"      ✅ 找到 {len(trades)} 条")
+        except Exception as e:
+            # 某些旧时间段可能报错，忽略
+            pass
+            
+        # 往前跳 7 天
+        current_start = current_end
+        time.sleep(0.1) # 防封号
+        
+    return all_trades
+
+def get_binance_data(api_key, api_secret, mode="recent", target_coins_str="", progress_callback=None):
+    """
+    Args:
+        mode: 'recent' (扫描所有币种最近7天) 或 'deep' (扫描指定币种过去1年)
+        target_coins_str: 用户输入的币种字符串，如 "BTC, ETH"
+    """
+    print(f"--- 启动数据同步: 模式={mode} ---")
+    
     exchange = ccxt.binance({
         'apiKey': api_key,
         'secret': api_secret,
-        'timeout': 30000,
         'enableRateLimit': True,
-        'options': {
-            'defaultType': 'future', 
-        }
+        'options': { 'defaultType': 'future' }
     })
 
     try:
-        # 3. 获取所有交易对
-        if progress_callback: progress_callback("正在下载币安合约交易对清单...", 0)
+        # 1. 准备币种清单
+        if progress_callback: progress_callback("正在连接交易所并下载交易对...", 0)
         exchange.load_markets()
         
-        # 筛选 USDT 合约
         target_symbols = []
-        for symbol, market in exchange.markets.items():
-            if market.get('quote') == 'USDT' and market.get('contract') == True:
-                target_symbols.append(symbol)
         
-        total_symbols = len(target_symbols)
-        print(f"✅ 需扫描 {total_symbols} 个交易对")
-        if total_symbols == 0:
-            return None, "未找到交易对。"
+        if mode == "recent":
+            # 模式A：自动找所有 USDT 合约
+            for symbol, market in exchange.markets.items():
+                if market.get('quote') == 'USDT' and market.get('contract') == True:
+                    target_symbols.append(symbol)
+            print(f"✅ [快速模式] 扫描所有 {len(target_symbols)} 个合约的最近记录")
+            
+        else:
+            # 模式B：只查用户指定的
+            if not target_coins_str:
+                return None, "深度模式下，必须输入具体的币种（例如 BTC, ETH）。"
+            
+            # 处理用户输入的字符串 "btc, eth" -> ['BTC/USDT', 'ETH/USDT']
+            user_coins = [x.strip().upper() for x in target_coins_str.split(',') if x.strip()]
+            for coin in user_coins:
+                # 尝试补全 /USDT
+                if not coin.endswith('/USDT'):
+                    coin = f"{coin}/USDT"
+                if coin in exchange.markets:
+                    target_symbols.append(coin)
+            print(f"✅ [深度模式] 将挖掘以下币种的 1 年历史: {target_symbols}")
 
-        # 4. 循环扫描
-        all_trades = []
+        if not target_symbols:
+            return None, "没有有效的交易对可供扫描。"
+
+        # 2. 开始抓取
+        all_results = []
+        total_symbols = len(target_symbols)
+        
+        # 设定深度扫描的时间范围 (过去 365 天)
+        one_year_ago = int((datetime.now() - timedelta(days=365)).timestamp() * 1000)
+        now_ts = int(datetime.now().timestamp() * 1000)
         
         for index, symbol in enumerate(target_symbols):
-            # 进度显示
             progress = (index + 1) / total_symbols
             status_text = f"正在扫描 ({index+1}/{total_symbols}): {symbol}"
             if progress_callback: progress_callback(status_text, progress)
             print(status_text)
             try:
-                # 🌟 核心修改：加入 since 参数 🌟
-                # 告诉币安：给我从 since_timestamp 开始的所有数据
-                # limit=1000 是单次最大值
-                trades = exchange.fetch_my_trades(symbol=symbol, since=since_timestamp, limit=1000)
+                trades = []
+                if mode == "recent":
+                    # 快速模式：不传 since，默认最近 7 天
+                    trades = exchange.fetch_my_trades(symbol=symbol, limit=1000)
+                else:
+                    # 深度模式：使用切片函数
+                    trades = fetch_history_chunked(exchange, symbol, one_year_ago, now_ts)
                 
                 if trades:
-                    print(f"   🎉 {symbol}: 找到 {len(trades)} 条记录")
-                    all_trades.extend(trades)
-                    
-                    # ⚠️ 高级逻辑：如果超过 1000 条怎么办？
-                    # 通常小白用户单币种一年内很少超过1000笔成交。
-                    # 如果你交易极其频繁，这里需要写更复杂的 while 循环分页。
-                    # 目前版本我们先抓前1000条，跑通流程为主。
+                    print(f"   🎉 {symbol}: 获取到 {len(trades)} 条数据")
+                    all_results.extend(trades)
                 
-                time.sleep(0.05) # 防封号延迟
-                
+                # 只有快速模式才需要稍微休息，深度模式在内部已经sleep了
+                if mode == "recent":
+                    time.sleep(0.05) 
             except Exception as e:
-                # print(f"错误 {symbol}: {e}")
+                print(f"   ⚠️ {symbol} 失败: {e}")
                 continue
 
-        if not all_trades:
-            return None, f"在过去 {months_back} 个月内未发现任何交易记录。"
+        # 3. 清洗数据
+        if not all_results:
+            return None, "扫描完成，未发现任何记录。"
 
-        # 5. 清洗数据
-        if progress_callback: progress_callback("正在整理历史数据...", 0.99)
+        if progress_callback: progress_callback("正在清洗整理数据...", 0.99)
         
         data_list = []
-        for i, t in enumerate(all_trades):
+        for i, t in enumerate(all_results):
             try:
-                # 提取 PnL
+                # 提取 PnL 和 Fee
                 pnl = 0.0
                 info = t.get('info', {})
                 if isinstance(info, dict):
                     pnl = safe_float(info.get('realizedPnl'))
                 
-                # 提取 Fee
                 commission = 0.0
                 fee = t.get('fee')
                 if fee and isinstance(fee, dict):
                     commission = safe_float(fee.get('cost'))
                     
+                # 统一时间格式
+                ts = t.get('timestamp', int(time.time()*1000))
+                
                 row = {
                     'id': str(t.get('id', f'unknown_{i}')),
                     'exchange': 'Binance',
@@ -113,8 +157,8 @@ def get_binance_futures_history(api_key, api_secret, progress_callback=None, mon
                     'qty': safe_float(t.get('amount')),
                     'realized_pnl': pnl,
                     'commission': commission,
-                    'timestamp': t.get('timestamp', int(time.time()*1000)),
-                    'date_str': datetime.fromtimestamp(t['timestamp'] / 1000).strftime('%Y-%m-%d %H:%M:%S'),
+                    'timestamp': ts,
+                    'date_str': datetime.fromtimestamp(ts / 1000).strftime('%Y-%m-%d %H:%M:%S'),
                     'notes': '',        
                     'ai_analysis': ''   
                 }
@@ -124,10 +168,12 @@ def get_binance_futures_history(api_key, api_secret, progress_callback=None, mon
 
         df = pd.DataFrame(data_list)
         df = df.sort_values(by='timestamp', ascending=False)
+        # 去重（防止多次抓取重复）
+        df = df.drop_duplicates(subset=['id'])
         
         return df, "success"
 
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return None, f"扫描中断: {str(e)}"
+        return None, f"运行错误: {str(e)}"
