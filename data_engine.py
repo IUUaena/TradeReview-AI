@@ -12,6 +12,8 @@ class TradeDataEngine:
     def _init_db(self):
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
+        
+        # 1. 交易数据表 (保持不变)
         c.execute('''
             CREATE TABLE IF NOT EXISTS trades (
                 id TEXT,
@@ -31,8 +33,81 @@ class TradeDataEngine:
                 UNIQUE(id, api_key_tag)
             )
         ''')
+        
+        # 2. 新增：API 账号管理表
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS api_configs (
+                api_key TEXT PRIMARY KEY,
+                secret TEXT,
+                alias TEXT
+            )
+        ''')
+        
         conn.commit()
         conn.close()
+
+    # ===========================
+    #  🔑 账户管理功能 (新增)
+    # ===========================
+    
+    def save_api_key(self, api_key, secret, alias):
+        """保存或更新 API Key"""
+        clean_key = api_key.strip()
+        clean_secret = secret.strip()
+        clean_alias = alias.strip()
+        
+        if not clean_key or not clean_secret or not clean_alias:
+            return False, "❌ 所有字段都不能为空"
+            
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        try:
+            # 如果 Key 存在则更新，不存在则插入
+            c.execute('INSERT OR REPLACE INTO api_configs (api_key, secret, alias) VALUES (?, ?, ?)', 
+                      (clean_key, clean_secret, clean_alias))
+            conn.commit()
+            return True, f"✅ 账户【{clean_alias}】保存成功！"
+        except Exception as e:
+            return False, str(e)
+        finally:
+            conn.close()
+
+    def get_all_accounts(self):
+        """获取所有已保存的账户 (用于下拉菜单)"""
+        conn = sqlite3.connect(self.db_path)
+        df = pd.read_sql_query("SELECT alias, api_key FROM api_configs", conn)
+        conn.close()
+        return df
+
+    def get_credentials(self, api_key):
+        """根据 Key 获取 Secret"""
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        c.execute("SELECT secret FROM api_configs WHERE api_key = ?", (api_key,))
+        result = c.fetchone()
+        conn.close()
+        return result[0] if result else None
+
+    def delete_account_full(self, api_key):
+        """🧨 核弹按钮：删除账号配置 + 所有相关历史交易"""
+        key_tag = api_key.strip()[-4:]
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        
+        # 1. 删交易数据
+        c.execute("DELETE FROM trades WHERE api_key_tag = ?", (key_tag,))
+        trades_count = c.rowcount
+        
+        # 2. 删账号配置
+        c.execute("DELETE FROM api_configs WHERE api_key = ?", (api_key,))
+        
+        conn.commit()
+        conn.close()
+        return trades_count
+
+    # ===========================
+    #  📉 交易所连接与抓取 (保持之前的优秀逻辑)
+    # ===========================
 
     def get_exchange(self, api_key, secret):
         clean_key = api_key.strip() if api_key else ""
@@ -53,126 +128,77 @@ class TradeDataEngine:
         exchange = self.get_exchange(api_key, secret)
         if not exchange: return "❌ 交易所对象创建失败", 0
         
-        # --- 预处理：建立币种映射 ---
         try:
             if progress_callback: progress_callback("📡 连接交易所获取合约名录...", 1)
             markets = exchange.load_markets()
-            
-            # 建立映射表
             coin_map = {}
             all_usdt_symbols = []
-            
             for s, m in markets.items():
                 if '/USDT' in s and m.get('contract'):
                     all_usdt_symbols.append(s)
                     base = m.get('base')
-                    if base:
-                        coin_map[base.upper()] = s
-            
+                    if base: coin_map[base.upper()] = s
             all_usdt_symbols = sorted(list(set(all_usdt_symbols)))
             total_count = len(all_usdt_symbols)
-
         except Exception as e:
             return f"❌ 连接失败: {str(e)}", 0
 
         key_tag = api_key.strip()[-4:]
         all_trades = []
 
-        # =========================================================
-        # 模式 A: 快速扫描 (最近7天)
-        # =========================================================
+        # --- 模式 A: 快速 ---
         if mode == 'recent':
-            if progress_callback: 
-                progress_callback(f"🚀 准备扫描 {total_count} 个合约 (最近7天)...", 5)
-            
+            if progress_callback: progress_callback(f"🚀 准备扫描 {total_count} 个合约 (最近7天)...", 5)
             since_time = int((datetime.now() - timedelta(days=7)).timestamp() * 1000)
-            
             for i, symbol in enumerate(all_usdt_symbols):
                 try:
                     if i % 5 == 0 and progress_callback:
                         pct = 5 + int((i / total_count) * 90)
                         progress_callback(f"🔍 [{i}/{total_count}] 扫描: {symbol}", pct)
-                        
                     trades = exchange.fetch_my_trades(symbol=symbol, since=since_time, limit=100)
                     if trades: 
                         all_trades.extend(trades)
                         time.sleep(0.05) 
-                except:
-                    continue
+                except: continue
 
-        # =========================================================
-        # 模式 B: 深度挖掘 (最近1年，倒序切片)
-        # =========================================================
+        # --- 模式 B: 深度 (最近1年倒序) ---
         elif mode == 'deep':
-            if not target_coins_str:
-                return "⚠️ 请输入币种", 0
-            
+            if not target_coins_str: return "⚠️ 请输入币种", 0
             user_inputs = [s.strip().upper() for s in target_coins_str.split(',') if s.strip()]
             target_symbols = []
-            
             for u_coin in user_inputs:
-                if u_coin in coin_map:
-                    target_symbols.append(coin_map[u_coin])
-                else:
-                    target_symbols.append(f"{u_coin}/USDT")
-
-            if not target_symbols:
-                 return "❌ 未找到匹配的合约，请检查拼写。", 0
-
-            # --- 🕒 时间设置调整：最近1年 ---
-            now_ts = exchange.milliseconds()
-            # 核心修改：只回溯到 365 天前
-            stop_ts = int((datetime.now() - timedelta(days=365)).timestamp() * 1000)
+                if u_coin in coin_map: target_symbols.append(coin_map[u_coin])
+                else: target_symbols.append(f"{u_coin}/USDT")
             
-            # 窗口大小：7天
-            window_size = 7 * 24 * 60 * 60 * 1000
+            if not target_symbols: return "❌ 无匹配合约", 0
 
+            now_ts = exchange.milliseconds()
+            stop_ts = int((datetime.now() - timedelta(days=365)).timestamp() * 1000)
+            window_size = 7 * 24 * 60 * 60 * 1000
             total_targets = len(target_symbols)
 
             for i, symbol in enumerate(target_symbols):
                 current_end = now_ts
-                
                 while current_end > stop_ts:
                     current_start = current_end - window_size
-                    if current_start < stop_ts:
-                        current_start = stop_ts 
-
-                    end_date_str = datetime.fromtimestamp(current_end/1000).strftime('%Y-%m-%d')
-                    start_date_str = datetime.fromtimestamp(current_start/1000).strftime('%Y-%m-%d')
+                    if current_start < stop_ts: current_start = stop_ts 
                     
-                    msg = f"⛏️ [{i+1}/{total_targets}] {symbol}: 正在查 {start_date_str} 至 {end_date_str}..."
+                    msg = f"⛏️ [{i+1}/{total_targets}] {symbol}: 查区间 {datetime.fromtimestamp(current_start/1000).strftime('%Y-%m-%d')}..."
                     if progress_callback: progress_callback(msg, 50)
-                    print(f"DEBUG: Checking {symbol} from {start_date_str} to {end_date_str}")
-
+                    
                     try:
-                        trades = exchange.fetch_my_trades(
-                            symbol=symbol, 
-                            since=current_start, 
-                            limit=1000, 
-                            params={'endTime': current_end}
-                        )
-                        
-                        if trades:
-                            all_trades.extend(trades)
-                        
+                        trades = exchange.fetch_my_trades(symbol=symbol, since=current_start, limit=1000, params={'endTime': current_end})
+                        if trades: all_trades.extend(trades)
                         current_end = current_start
-                        if current_end <= stop_ts:
-                            break
+                        if current_end <= stop_ts: break
                         time.sleep(0.3)
-
-                    except Exception:
+                    except:
                         current_end = current_start 
                         time.sleep(1)
 
-        # =========================================================
-        # 入库
-        # =========================================================
-        if not all_trades:
-            return f"✅ 扫描完成。最近1年内未发现数据。", 0
-
-        if progress_callback: progress_callback(f"💾 正在保存 {len(all_trades)} 条记录...", 95)
+        if not all_trades: return f"✅ 扫描完成。未发现新数据。", 0
+        if progress_callback: progress_callback(f"💾 保存 {len(all_trades)} 条记录...", 95)
         new_count = self._save_to_db(all_trades, key_tag)
-        
         if progress_callback: progress_callback("✅ 完成！", 100)
         return "成功", new_count
 
@@ -184,19 +210,13 @@ class TradeDataEngine:
             try:
                 pnl = float(t.get('info', {}).get('realizedPnl', 0))
                 fee = float(t.get('fee', {}).get('cost', 0)) if t.get('fee') else 0.0
-                
                 c.execute('''
                     INSERT OR IGNORE INTO trades 
                     (id, timestamp, datetime, symbol, side, price, amount, cost, fee, fee_currency, pnl, api_key_tag)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (
-                    str(t['id']), t['timestamp'], t['datetime'], t['symbol'], t['side'], 
-                    float(t['price'] or 0), float(t['amount'] or 0), float(t['cost'] or 0), 
-                    fee, 'USDT', pnl, key_tag
-                ))
+                ''', (str(t['id']), t['timestamp'], t['datetime'], t['symbol'], t['side'], float(t['price'] or 0), float(t['amount'] or 0), float(t['cost'] or 0), fee, 'USDT', pnl, key_tag))
                 if c.rowcount > 0: count += 1
-            except:
-                continue
+            except: continue
         conn.commit()
         conn.close()
         return count
@@ -206,17 +226,6 @@ class TradeDataEngine:
         key_tag = api_key.strip()[-4:] if api_key else ""
         try:
             df = pd.read_sql_query("SELECT * FROM trades WHERE api_key_tag = ? ORDER BY timestamp DESC", conn, params=(key_tag,))
-        except:
-            df = pd.DataFrame()
+        except: df = pd.DataFrame()
         conn.close()
         return df
-
-    def delete_account_data(self, api_key):
-        conn = sqlite3.connect(self.db_path)
-        c = conn.cursor()
-        key_tag = api_key.strip()[-4:] if api_key else ""
-        c.execute("DELETE FROM trades WHERE api_key_tag = ?", (key_tag,))
-        n = c.rowcount
-        conn.commit()
-        conn.close()
-        return n
