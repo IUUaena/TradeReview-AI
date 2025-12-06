@@ -1,277 +1,174 @@
 import streamlit as st
-import db_manager as db
 import pandas as pd
-import sqlite3
+import plotly.express as px
+from data_engine import TradeDataEngine
 
-# 1. 基础配置
+# -----------------------------------------------------------------------------
+# 1. 页面配置：必须放在第一行
+# -----------------------------------------------------------------------------
 st.set_page_config(
     page_title="TradeReview AI",
-    page_icon="🦁",
-    layout="wide",
+    page_icon="📈",
+    layout="wide",  # 使用宽屏模式，看数据更舒服
     initial_sidebar_state="expanded"
 )
 
-# 隐藏右上角菜单
-st.markdown("""<style>#MainMenu {visibility: hidden;} header {visibility: hidden;} footer {visibility: hidden;}</style>""", unsafe_allow_html=True)
-
-# 初始化
-db.init_db()
-
-# 侧边栏
-st.sidebar.title("🦁 交易复盘 AI")
-page = st.sidebar.radio("导航", ["📊 仪表盘 & 复盘", "🔄 数据同步", "⚙️ 设置 & API"])
-
-# =========================================================
-# 页面 1: 仪表盘 & 复盘工作台 (核心功能)
-# =========================================================
-if page == "📊 仪表盘 & 复盘":
-    # 1. 读取数据
-    conn = sqlite3.connect(db.DB_NAME)
-    try:
-        raw_df = pd.read_sql_query("SELECT * FROM trades", conn)
-    except:
-        raw_df = pd.DataFrame()
-    conn.close()
-
-    if raw_df.empty:
-        st.warning("暂无数据，请先前往【🔄 数据同步】页面获取数据。")
-    else:
-        import data_processor
-        import plotly.express as px
-
-        # 2. 数据预处理
-        raw_df['timestamp'] = pd.to_numeric(raw_df['timestamp'], errors='coerce').fillna(0).astype(int)
-        raw_df['realized_pnl'] = pd.to_numeric(raw_df['realized_pnl'], errors='coerce').fillna(0.0)
-        if 'commission' not in raw_df.columns: raw_df['commission'] = 0.0
-        
-        # 3. 核心计算
-        try:
-            trades_df = data_processor.process_trades_to_rounds(raw_df)
-        except Exception as e:
-            st.error(f"数据计算错误: {e}")
-            trades_df = pd.DataFrame()
-
-        if not trades_df.empty:
-            # --- Part A: 顶部 KPI ---
-            total_pnl = trades_df['net_pnl'].sum()
-            win_rate = (len(trades_df[trades_df['net_pnl'] > 0]) / len(trades_df) * 100)
-            
-            k1, k2, k3, k4 = st.columns(4)
-            k1.metric("💰 净盈亏", f"{total_pnl:,.2f} U", delta_color="normal")
-            k2.metric("🎯 胜率", f"{win_rate:.1f}%")
-            k3.metric("🔢 交易笔数", f"{len(trades_df)}")
-            k4.metric("手续费总计", f"{trades_df['total_fee'].sum():,.2f} U")
-            
-            st.divider()
-
-            # --- Part B: 左右分栏布局 ---
-            col_left, col_right = st.columns([3, 2])
-            
-            # === 左侧：交易列表 ===
-            with col_left:
-                st.subheader("📝 交易列表")
-                
-                # 样式着色
-                def highlight_pnl(val):
-                    color = '#d4edda' if val > 0 else '#f8d7da' if val < 0 else ''
-                    return f'background-color: {color}; color: black'
-
-                # 展示表格
-                st.dataframe(
-                    trades_df[['symbol', 'direction', 'open_date', 'net_pnl', 'duration_min', 'trade_count']]
-                    .style.format({'net_pnl': '{:.2f}'})
-                    .applymap(highlight_pnl, subset=['net_pnl']),
-                    use_container_width=True,
-                    height=500
-                )
-
-            # === 右侧：复盘工作台 ===
-            with col_right:
-                st.subheader("🕵️‍♂️ 复盘工作台")
-                st.caption("选择一笔交易，写下笔记，或让 AI 点评。")
-                
-                # 构造下拉选择框
-                options = []
-                # 将 dataframe 的 index 和 open_id 绑定
-                for idx, row in trades_df.iterrows():
-                    label = f"#{idx} | {row['symbol']} ({row['direction']}) | {row['open_date']} | {row['net_pnl']} U"
-                    options.append(label)
-                
-                selected_label = st.selectbox("👉 选择要复盘的交易:", options)
-                
-                if selected_label:
-                    # 1. 获取选中的交易数据
-                    selected_index = int(selected_label.split("|")[0].replace("#", "").strip())
-                    trade_data = trades_df.loc[selected_index]
-                    target_id = trade_data['open_id'] # 🌟 获取到了具体的 ID！
-
-                    # 2. 从数据库读取已存在的笔记和 AI 点评
-                    conn = sqlite3.connect(db.DB_NAME)
-                    c = conn.cursor()
-                    c.execute("SELECT notes, ai_analysis FROM trades WHERE id=?", (target_id,))
-                    row_db = c.fetchone()
-                    conn.close()
-                    
-                    existing_note = row_db[0] if row_db and row_db[0] else ""
-                    existing_ai = row_db[1] if row_db and row_db[1] else ""
-
-                    # 3. 展示详情卡片
-                    st.info(f"""
-                    **标的**: {trade_data['symbol']}   |   **方向**: {trade_data['direction']}
-                    \n**盈亏**: {trade_data['net_pnl']} U   |   **持仓**: {trade_data['duration_min']} 分钟
-                    \n**开仓时间**: {trade_data['open_date']}
-                    """)
-
-                    # 4. 笔记输入框
-                    user_note = st.text_area("✍️ 复盘笔记 (自动加载已保存内容):", value=existing_note, height=150)
-                    
-                    # 5. 操作按钮区
-                    col_save, col_ai = st.columns(2)
-                    
-                    # 保存按钮
-                    if col_save.button("💾 保存笔记"):
-                        db.update_trade_note(target_id, user_note, existing_ai)
-                        st.success("✅ 笔记已保存到数据库！")
-                        # 强制刷新一下页面以显示最新状态（可选）
-                        st.rerun()
-
-                    # AI 按钮
-                    if col_ai.button("🤖 呼叫 AI 毒舌导师"):
-                        ai_key, base_url = db.get_ai_settings()
-                        if not ai_key:
-                            st.error("❌ 未配置 AI Key！请去设置页面。")
-                        else:
-                            with st.spinner("🦁 导师正在分析 K 线和你的操作..."):
-                                import ai_assistant
-                                analysis = ai_assistant.get_ai_analysis(ai_key, base_url, trade_data, user_note)
-                                
-                                # 自动保存 AI 结果
-                                db.update_trade_note(target_id, user_note, analysis)
-                                st.success("点评完成并已保存！")
-                                st.rerun() # 刷新显示结果
-
-                    # 6. 展示 AI 点评结果
-                    if existing_ai:
-                        st.markdown("### 🦁 导师点评：")
-                        st.info(existing_ai)
-
-# =========================================================
-# 页面 2: 数据同步
-# =========================================================
-elif page == "🔄 数据同步":
-    st.title("🔄 交易数据同步")
+# -----------------------------------------------------------------------------
+# 2. 辅助函数：计算核心指标
+# -----------------------------------------------------------------------------
+def calculate_metrics(df):
+    if df.empty:
+        return 0, 0, 0, 0
     
-    keys_df = db.get_all_keys()
-    # 过滤掉 AI Config
-    exchange_keys = keys_df[keys_df['exchange_name'] != 'AI_Config']
+    total_pnl = df['pnl'].sum()
+    total_trades = len(df)
     
-    if exchange_keys.empty:
-        st.warning("⚠️ 请先去【设置】页面配置交易所 API。")
-    else:
-        selected_exchange = st.selectbox("选择账户", exchange_keys['exchange_name'])
-        st.divider()
-        
-        mode_label = st.radio("选择扫描模式", 
-            ["🚀 极速扫描 (最近7天)", "📅 月度扫描 (最近30天)", "⛏️ 深度挖掘 (过去1年)"],
-            captions=["最快。补全最近遗漏。", "推荐。适合常规复盘。", "最慢。需指定币种。"]
-        )
-        
-        target_coins = ""
-        mode_code = "fast"
-        if "月度" in mode_label: mode_code = "month"
-        if "深度" in mode_label: 
-            mode_code = "deep"
-            st.info("💡 深度模式需要逐个扫描，请输入币种。")
-            target_coins = st.text_input("目标币种 (例如: BTC, ETH)", value="BTC, ETH")
-        
-        if st.button("🚀 开始同步"):
-            key_info = db.get_api_key(selected_exchange)
-            if key_info:
-                api_key, api_secret = key_info
-                pb = st.progress(0)
-                status = st.empty()
-                
-                def update_progress(msg, value):
-                    status.text(msg)
-                    pb.progress(value)
+    # 胜率计算 (PnL > 0 视为胜)
+    winning_trades = len(df[df['pnl'] > 0])
+    win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
+    
+    # 最大单笔盈利
+    max_profit = df['pnl'].max()
+    
+    return total_pnl, win_rate, total_trades, max_profit
 
-                import exchange_api
-                
-                df, msg = exchange_api.get_binance_data(api_key, api_secret, 
-                                                        mode=mode_code, 
-                                                        target_coins_str=target_coins,
-                                                        progress_callback=update_progress)
-                pb.empty()
-                status.empty()
+# -----------------------------------------------------------------------------
+# 3. 初始化引擎
+# -----------------------------------------------------------------------------
+engine = TradeDataEngine()
 
-                if df is not None:
-                    # 入库
-                    conn = sqlite3.connect(db.DB_NAME)
-                    cursor = conn.cursor()
-                    count = 0
-                    for index, row in df.iterrows():
-                        try:
-                            cursor.execute('''
-                                INSERT OR IGNORE INTO trades 
-                                (id, exchange, symbol, side, price, qty, realized_pnl, commission, timestamp, date_str, notes, ai_analysis)
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            ''', (
-                                row['id'], row['exchange'], row['symbol'], row['side'], 
-                                row['price'], row['qty'], row['realized_pnl'], row['commission'],
-                                row['timestamp'], row['date_str'], '', ''
-                            ))
-                            if cursor.rowcount > 0: count += 1
-                        except: pass
-                    conn.commit()
-                    conn.close()
-                    
-                    if count > 0:
-                        st.balloons()
-                        st.success(f"成功入库 {count} 条新记录！")
-                    else:
-                        st.warning("同步完成，但没有新增记录。")
-                    st.dataframe(df)
+# -----------------------------------------------------------------------------
+# 4. 侧边栏：控制中心
+# -----------------------------------------------------------------------------
+with st.sidebar:
+    st.header("🔐 账户控制台")
+    
+    # API 输入区 (密码模式，不显示明文)
+    api_key = st.text_input("Binance API Key", type="password")
+    api_secret = st.text_input("Binance Secret Key", type="password")
+    
+    st.markdown("---")
+    
+    # 按钮 A: 同步数据
+    if st.button("🔄 同步历史数据 (全量)"):
+        if not api_key or not api_secret:
+            st.error("请输入 API Key 和 Secret")
+        else:
+            with st.spinner("正在从交易所挖掘所有历史记录，请稍候..."):
+                msg = engine.fetch_and_save_all_history(api_key, api_secret)
+                if "成功" in msg:
+                    st.success(msg)
+                    st.rerun() # 刷新页面显示新数据
                 else:
-                    st.error(f"❌ {msg}")
-
-# =========================================================
-# 页面 3: 设置 & API
-# =========================================================
-elif page == "⚙️ 设置 & API":
-    st.title("⚙️ 系统设置")
+                    st.error(msg)
     
-    tab1, tab2 = st.tabs(["交易所 API", "AI 导师配置"])
+    st.markdown("---")
     
-    with tab1:
-        st.subheader("Binance API")
-        with st.form("binance_form"):
-            exchange = st.selectbox("交易所", ["Binance (U本位合约)"])
-            key = st.text_input("API Key", type="password")
-            secret = st.text_input("Secret Key", type="password")
-            if st.form_submit_button("💾 保存交易所配置"):
-                db.save_api_key(exchange, key, secret)
-                st.success("Binance 配置已保存！")
-                
-        st.caption("已连接账户:")
-        keys = db.get_all_keys()
-        real_keys = keys[keys['exchange_name'] != 'AI_Config']
-        if not real_keys.empty:
-            real_keys['api_key'] = real_keys['api_key'].apply(lambda x: x[:6]+"******")
-            st.dataframe(real_keys, hide_index=True)
+    # 按钮 B: 危险区域 - 隐私清除
+    st.subheader("⚠️ 危险区域")
+    if st.button("🗑️ 删除该账户所有数据", type="primary"):
+        if not api_key:
+            st.warning("请输入要删除数据的 API Key 以确认身份")
+        else:
+            deleted = engine.delete_account_data(api_key)
+            st.success(f"安全清除：已物理删除 {deleted} 条与该 Key 关联的记录。")
+            st.rerun()
 
-    with tab2:
-        st.subheader("🤖 AI 导师配置 (支持 DeepSeek)")
-        st.markdown("""
-        1. 推荐使用 [DeepSeek](https://platform.deepseek.com/) (性价比高)。
+# -----------------------------------------------------------------------------
+# 5. 主界面：可视化仪表盘
+# -----------------------------------------------------------------------------
+st.title("📈 交易复盘 AI 驾驶舱")
 
-        2. Base URL 默认为 `https://api.deepseek.com`。
+# 尝试加载数据
+if api_key:
+    df = engine.load_trades(api_key)
+else:
+    df = pd.DataFrame()
 
-        """)
+if df.empty:
+    # 空状态显示
+    st.info("👋 欢迎！请在左侧输入 API Key 并点击"同步"以开始复盘之旅。")
+    st.markdown("""
+    **功能指引：**
+    1. 输入 Binance 合约 API Key (只读权限即可)。
+    2. 点击 **同步历史数据**，系统将抓取您账户所有的历史记录。
+    3. 数据存储在本地数据库，点击 **删除账户数据** 可彻底销毁。
+    """)
+else:
+    # --- A. 核心指标卡片 (Metrics) ---
+    t_pnl, win_rate, t_count, max_p = calculate_metrics(df)
+    
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("💰 总盈亏 (USDT)", f"{t_pnl:,.2f}", delta=f"{t_pnl:,.2f}")
+    with col2:
+        st.metric("🎯 胜率", f"{win_rate:.1f}%")
+    with col3:
+        st.metric("📊 总交易笔数", f"{t_count}")
+    with col4:
+        st.metric("🚀 单笔最大盈利", f"{max_p:,.2f}")
+    
+    st.markdown("---")
+    
+    # --- B. 资金曲线图 (Visuals) ---
+    st.subheader("📉 资金/盈亏走势")
+    
+    # 数据预处理：按时间正序排列以便画图
+    df_chart = df.sort_values('timestamp')
+    # 计算累计盈亏 (Cumulative PnL)
+    df_chart['cumulative_pnl'] = df_chart['pnl'].cumsum()
+    # 转换时间格式方便阅读
+    df_chart['date_str'] = pd.to_datetime(df_chart['timestamp'], unit='ms')
+    
+    # 使用 Plotly 画交互式图表
+    fig = px.line(
+        df_chart, 
+        x='date_str', 
+        y='cumulative_pnl', 
+        title='累计盈亏曲线 (Cumulative PnL)',
+        markers=True
+    )
+    # 优化图表样式：深色背景，隐藏网格
+    fig.update_layout(
+        xaxis_title="时间",
+        yaxis_title="累计盈亏 (USDT)",
+        hovermode="x unified"
+    )
+    # 如果盈亏是正的，线显示绿色，负的显示红色 (简单处理)
+    line_color = '#00FF00' if t_pnl >= 0 else '#FF0000'
+    fig.update_traces(line_color=line_color)
+    
+    st.plotly_chart(fig, use_container_width=True)
+    
+    # --- C. 详细交易列表 (Data Table) ---
+    st.subheader("📝 详细交易记录")
+    
+    # 简单筛选器
+    filter_col1, filter_col2 = st.columns(2)
+    with filter_col1:
+        symbol_filter = st.multiselect("筛选币种", options=df['symbol'].unique())
+    with filter_col2:
+        side_filter = st.multiselect("筛选方向 (Long/Short)", options=df['side'].unique())
         
-        with st.form("ai_form"):
-            ai_key = st.text_input("AI API Key (sk-...)", type="password")
-            ai_base = st.text_input("Base URL", value="https://api.deepseek.com")
-            
-            if st.form_submit_button("💾 保存 AI 配置"):
-                db.save_ai_settings("AI_Config", ai_key, ai_base)
-                st.success("AI 导师已就位！")
+    # 应用筛选
+    df_display = df.copy()
+    if symbol_filter:
+        df_display = df_display[df_display['symbol'].isin(symbol_filter)]
+    if side_filter:
+        df_display = df_display[df_display['side'].isin(side_filter)]
+    
+    # 展示表格：只展示关键列，看着清爽
+    st.dataframe(
+        df_display[['datetime', 'symbol', 'side', 'price', 'amount', 'pnl', 'fee']],
+        use_container_width=True,
+        height=400,
+        column_config={
+            "datetime": "时间",
+            "symbol": "币种",
+            "side": "方向",
+            "price": "价格",
+            "amount": "数量",
+            "pnl": st.column_config.NumberColumn("盈亏 (PnL)", format="$%.2f"),
+            "fee": "手续费"
+        }
+    )
