@@ -1,6 +1,7 @@
 import streamlit as st
 import db_manager as db
 import pandas as pd
+import sqlite3
 
 # 1. 页面基础设置
 st.set_page_config(
@@ -17,13 +18,109 @@ db.init_db()
 st.sidebar.title("🦁 交易复盘 AI")
 page = st.sidebar.radio("导航", ["📊 仪表盘", "🔄 数据同步", "⚙️ 设置 & API"])
 
-# --- 页面 1: 仪表盘 (暂时留空) ---
+# --- 页面 1: 仪表盘 ---
 if page == "📊 仪表盘":
-    st.title("交易总览")
-    st.info("👋 欢迎回来！请先去【设置】页面配置你的交易所 API，再去【数据同步】页面抓取数据。")
+    # 1. 尝试从数据库加载原始数据
+    conn = sqlite3.connect(db.DB_NAME)
+    try:
+        raw_df = pd.read_sql_query("SELECT * FROM trades", conn)
+    except:
+        raw_df = pd.DataFrame()
+    conn.close()
     
-    # 只有当有数据时才显示（未来实现）
-    st.write("waiting for data...")
+    if raw_df.empty:
+        st.title("📊 交易总览")
+        st.warning("暂无数据。请先前往【🔄 数据同步】页面获取你的历史交易。")
+        st.info("💡 提示：同步完成后，这里将自动展示你的资金曲线和交易分析。")
+    
+    else:
+        # 2. 调用大脑进行数据处理
+        import data_processor
+        import plotly.express as px
+        import plotly.graph_objects as go
+        
+        # 转换数据类型，确保计算正确
+        raw_df['timestamp'] = raw_df['timestamp'].astype(int)
+        raw_df['realized_pnl'] = raw_df['realized_pnl'].astype(float)
+        
+        # 计算完整回合
+        trades_df = data_processor.process_trades_to_rounds(raw_df)
+        
+        # 检查处理后的数据是否为空
+        if trades_df.empty:
+            st.title("📊 交易总览")
+            st.warning("已检测到交易数据，但尚未形成完整的交易回合（可能都是未平仓的持仓）。")
+            st.info("💡 提示：请等待持仓平仓后，或确保数据中包含完整的开仓-平仓记录。")
+        else:
+            # --- A. 顶栏 KPI 指标 ---
+            st.title("📊 交易复盘仪表盘")
+            
+            # 计算核心指标
+            total_pnl = trades_df['net_pnl'].sum()
+            total_trades = len(trades_df)
+            winning_trades = trades_df[trades_df['net_pnl'] > 0]
+            win_rate = (len(winning_trades) / total_trades * 100) if total_trades > 0 else 0
+            
+            # 渲染 KPIs
+            kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+            kpi1.metric("💰 净盈亏 (Net PnL)", f"{total_pnl:,.2f} U", delta_color="normal")
+            kpi2.metric("🎯 胜率 (Win Rate)", f"{win_rate:.1f}%")
+            kpi3.metric("🔢 总交易数", f"{total_trades} 笔")
+            
+            # 计算最大单笔亏损 (用来警示)
+            max_loss = trades_df['net_pnl'].min()
+            kpi4.metric("⚠️ 最大单笔亏损", f"{max_loss:,.2f} U")
+            
+            st.divider()
+            
+            # --- B. 核心图表：资金累积曲线 (Equity Curve) ---
+            st.subheader("📈 资金增长曲线")
+            
+            # 按时间正序排列以计算累积
+            chart_df = trades_df.sort_values(by='close_time', ascending=True).copy()
+            chart_df['cumulative_pnl'] = chart_df['net_pnl'].cumsum()
+            
+            # 使用 Plotly 画面积图
+            fig = px.area(chart_df, x='open_date', y='cumulative_pnl', 
+                          title="累计盈亏走势 (Cumulative PnL)",
+                          labels={'cumulative_pnl': '累计盈亏 (USDT)', 'open_date': '日期'},
+                          color_discrete_sequence=['#00CC96']) # 绿色
+            
+            # 加一条 0 轴线
+            fig.add_hline(y=0, line_dash="dash", line_color="gray")
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # --- C. 详细交易列表 (Round Trips) ---
+            st.subheader("📝 完整交易记录 (Round Trips)")
+            st.caption("这里将原本零散的买卖记录合并为了完整的"开仓-平仓"回合。")
+            
+            # 简单的筛选器
+            filter_col1, filter_col2 = st.columns([1, 3])
+            with filter_col1:
+                symbol_filter = st.selectbox("筛选币种", ["All"] + list(trades_df['symbol'].unique()))
+            
+            display_df = trades_df.copy()
+            if symbol_filter != "All":
+                display_df = display_df[display_df['symbol'] == symbol_filter]
+            
+            # 美化表格显示
+            # 定义样式：盈利用绿色，亏损用红色
+            def highlight_pnl(val):
+                color = '#90EE90' if val > 0 else '#FFB6C1' if val < 0 else ''
+                return f'background-color: {color}; color: black'
+            
+            # 只展示关键列
+            show_cols = ['symbol', 'direction', 'open_date', 'net_pnl', 'duration_min', 'status', 'total_fee']
+            
+            # 使用 Streamlit 的 dataframe 展示，并应用颜色
+            st.dataframe(
+                display_df[show_cols].style.format({
+                    'net_pnl': '{:.2f}',
+                    'total_fee': '{:.2f}'
+                }).applymap(highlight_pnl, subset=['net_pnl']),
+                use_container_width=True,
+                height=400
+            )
 
 # --- 页面 2: 数据同步 ---
 elif page == "🔄 数据同步":
