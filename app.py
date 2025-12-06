@@ -27,69 +27,85 @@ if page == "📊 仪表盘":
 
 # --- 页面 2: 数据同步 ---
 elif page == "🔄 数据同步":
-    st.title("🔄 数据同步中心")
+    st.title("🔄 全量数据同步")
     
-    # 1. 先去数据库读取已保存的 API Key
     keys_df = db.get_all_keys()
     
     if keys_df.empty:
-        st.warning("⚠️ 你还没有配置 API Key。请先去【设置 & API】页面配置。")
+        st.warning("⚠️ 请先去【设置 & API】页面配置 Binance API。")
     else:
-        st.info("点击下方按钮，将从币安拉取最近的 100 笔合约交易记录并存入本地数据库。")
+        st.info("""
+        本次更新包含：
+
+        1. **全币种扫描**：自动检测币安所有 USDT 合约（约 200+ 个）。
+
+        2. **深度获取**：单次最大获取 1000 条记录。
+
+        ⚠️ 注意：由于需要扫描所有币种，过程可能需要 1-3 分钟，请耐心等待，不要关闭页面。
+
+        """)
         
-        # 让用户选择用哪个账号同步（目前主要是 Binance）
         selected_exchange = st.selectbox("选择要同步的账户", keys_df['exchange_name'])
         
-        if st.button("🚀 开始同步数据"):
-            # 获取具体的 Key 和 Secret
+        if st.button("🚀 开始全量扫描"):
             key_info = db.get_api_key(selected_exchange)
             if key_info:
                 api_key, api_secret = key_info
                 
-                with st.spinner(f"正在连接 {selected_exchange} ... 请稍候"):
-                    # 这里的 import 放在里面是为了避免循环引用
-                    import exchange_api
-                    import sqlite3
+                # 创建一个进度条容器
+                progress_bar = st.progress(0)
+                status_text = st.empty() # 用来显示文字状态
+                
+                # 定义回调函数，传给后端用来更新前端
+                def update_progress(msg, value):
+                    status_text.text(msg)
+                    progress_bar.progress(value)
+
+                import exchange_api
+                import sqlite3
+                
+                # 开始跑！
+                df, msg = exchange_api.get_binance_futures_history(api_key, api_secret, progress_callback=update_progress)
+                
+                # 完成后清理进度条
+                progress_bar.empty()
+                status_text.empty()
+
+                if df is not None:
+                    st.success(f"✅ 扫描完成！共抓取到 {len(df)} 笔交易。")
                     
-                    # 调用刚才写的抓取函数
-                    df, msg = exchange_api.get_binance_futures_history(api_key, api_secret)
+                    # 存入数据库
+                    conn = sqlite3.connect(db.DB_NAME)
+                    cursor = conn.cursor()
+                    count = 0
+                    for index, row in df.iterrows():
+                        try:
+                            cursor.execute('''
+                                INSERT OR IGNORE INTO trades 
+                                (id, exchange, symbol, side, price, qty, realized_pnl, timestamp, date_str, notes, ai_analysis)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            ''', (
+                                row['id'], row['exchange'], row['symbol'], row['side'], 
+                                row['price'], row['qty'], row['realized_pnl'], 
+                                row['timestamp'], row['date_str'], '', ''
+                            ))
+                            if cursor.rowcount > 0:
+                                count += 1
+                        except:
+                            pass
+                    conn.commit()
+                    conn.close()
                     
-                    if df is not None:
-                        st.success(f"成功获取 {len(df)} 笔交易！正在存入数据库...")
-                        
-                        # 存入数据库 (使用 append 模式，如果 ID 重复会被忽略或报错，我们需要处理一下)
-                        # 为了简单，我们先用 pandas 的 to_sql，但要注意去重
-                        # 这里我们用一个简单的循环来插入，避免 ID 冲突报错
-                        conn = sqlite3.connect(db.DB_NAME)
-                        cursor = conn.cursor()
-                        count = 0
-                        for index, row in df.iterrows():
-                            try:
-                                cursor.execute('''
-                                    INSERT OR IGNORE INTO trades 
-                                    (id, exchange, symbol, side, price, qty, realized_pnl, timestamp, date_str, notes, ai_analysis)
-                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                                ''', (
-                                    row['id'], row['exchange'], row['symbol'], row['side'], 
-                                    row['price'], row['qty'], row['realized_pnl'], 
-                                    row['timestamp'], row['date_str'], '', ''
-                                ))
-                                if cursor.rowcount > 0:
-                                    count += 1
-                            except Exception as e:
-                                pass # 忽略错误
-                        
-                        conn.commit()
-                        conn.close()
-                        
-                        st.balloons() # 撒花庆祝
-                        st.success(f"同步完成！新增了 {count} 笔新交易。请去【仪表盘】查看。")
-                        
-                        # 展示一下刚刚抓到的数据预览
-                        st.dataframe(df)
-                        
+                    if count > 0:
+                        st.balloons()
+                        st.success(f"成功入库 {count} 条新记录！请前往【仪表盘】查看。")
                     else:
-                        st.error(msg)
+                        st.warning("虽然抓取到了数据，但数据库里似乎已经都有了（没有新增）。")
+                    
+                    st.write("数据预览：")
+                    st.dataframe(df)
+                else:
+                    st.error(f"❌ {msg}")
 
 # --- 页面 3: 设置 & API ---
 elif page == "⚙️ 设置 & API":
