@@ -2,11 +2,26 @@ import ccxt
 import pandas as pd
 from datetime import datetime
 
+def safe_float(value, default=0.0):
+    """
+    一个极其强壮的数字转换器。
+    不管给它什么（None, 字符串, 对象），它都尽力转成数字，
+    转不了就返回 0.0，绝不报错。
+    """
+    try:
+        if value is None:
+            return default
+        return float(value)
+    except (ValueError, TypeError):
+        return default
+
 def get_binance_futures_history(api_key, api_secret, limit=100):
     """
     连接币安 U本位合约 (USDT-M) 获取历史成交记录
     """
-    # 1. 初始化交易所对象
+    print("--- 开始尝试连接交易所 ---") # Debug 标记
+    
+    # 1. 初始化交易所
     exchange = ccxt.binance({
         'apiKey': api_key,
         'secret': api_secret,
@@ -18,59 +33,95 @@ def get_binance_futures_history(api_key, api_secret, limit=100):
     })
 
     try:
-        # 2. 尝试获取账户余额（测试连接）
+        # 2. 测试连接
         exchange.fetch_balance()
-        print("✅ 交易所连接成功！")
+        print("✅ 交易所连接成功 (Balance Check OK)")
 
-        # 3. 获取最近的成交记录
+        # 3. 获取数据
+        # params={'incomeType': 'REALIZED_PNL'} 有时可以帮助筛选，但这里先抓全部
         trades = exchange.fetch_my_trades(symbol=None, limit=limit)
         
         if not trades:
-            return None, "没有找到最近的交易记录。"
+            return None, "连接成功，但没有找到最近的交易记录 (Trades list is empty)。"
 
-        # 4. 数据清洗：加固防弹版
+        print(f"📦 抓取到了 {len(trades)} 条原始记录")
+
+        # 4. 超级安全的清洗流程
         data_list = []
-        for t in trades:
+        
+        for i, t in enumerate(trades):
             try:
-                # --- 安全获取字段 ---
+                # 打印第一条数据看看长什么样（方便调试）
+                if i == 0:
+                    print(f"🔍 [DEBUG] 第一条原始数据样本: {t}")
+
+                # 必须确保 t 是个字典
+                if not isinstance(t, dict):
+                    print(f"⚠️ 跳过第 {i} 条：数据格式不是字典")
+                    continue
+
+                # --- 逐个字段安全提取 ---
                 
-                # 1. 处理原始信息 (info)
-                raw_info = t.get('info', {}) 
-                if raw_info is None: raw_info = {} # 双重保险
+                # ID
+                order_id = str(t.get('id', f'unknown_{i}'))
                 
-                # 2. 获取已实现盈亏 (Realized PnL)
-                # 如果获取不到，默认为 0.0
-                pnl = float(raw_info.get('realizedPnl', 0.0))
+                # Symbol
+                symbol = str(t.get('symbol', 'Unknown'))
                 
-                # 3. 处理手续费 (Fee)
-                # 有些特殊的单子可能没有 fee 字段，或者是 None
-                fee_cost = 0.0
-                fee_data = t.get('fee')
-                if fee_data and isinstance(fee_data, dict):
-                    fee_cost = float(fee_data.get('cost', 0.0))
+                # Side (buy/sell)
+                side = str(t.get('side', 'unknown'))
                 
-                # 4. 构建数据行
-                data_list.append({
-                    'id': str(t.get('id', '')), # 转成字符串防止报错
+                # Price
+                price = safe_float(t.get('price'))
+                
+                # Qty
+                amount = safe_float(t.get('amount'))
+                
+                # Realized PnL (最容易报错的地方)
+                pnl = 0.0
+                info = t.get('info')
+                if info and isinstance(info, dict):
+                    pnl = safe_float(info.get('realizedPnl'))
+                
+                # Commission/Fee (也很容易报错)
+                commission = 0.0
+                fee = t.get('fee')
+                # 这里的逻辑是：如果 fee 是 None，下面这行不会运行；
+                # 如果 fee 是字典但没有 cost，safe_float 会处理。
+                if fee and isinstance(fee, dict):
+                    commission = safe_float(fee.get('cost'))
+
+                # 时间戳
+                timestamp = t.get('timestamp')
+                if not timestamp:
+                    timestamp = int(datetime.now().timestamp() * 1000)
+                
+                date_str = datetime.fromtimestamp(timestamp / 1000).strftime('%Y-%m-%d %H:%M:%S')
+
+                # 构建最终行
+                row = {
+                    'id': order_id,
                     'exchange': 'Binance',
-                    'symbol': t.get('symbol', 'Unknown'),
-                    'side': t.get('side', 'unknown'),
-                    'price': float(t.get('price', 0.0)),
-                    'qty': float(t.get('amount', 0.0)),
+                    'symbol': symbol,
+                    'side': side,
+                    'price': price,
+                    'qty': amount,
                     'realized_pnl': pnl,
-                    'timestamp': t['timestamp'],
-                    'date_str': datetime.fromtimestamp(t['timestamp'] / 1000).strftime('%Y-%m-%d %H:%M:%S'),
-                    'commission': fee_cost,
+                    'timestamp': timestamp,
+                    'date_str': date_str,
+                    'commission': commission,
                     'notes': '',        
                     'ai_analysis': ''   
-                })
+                }
+                data_list.append(row)
+
             except Exception as inner_e:
-                # 如果某一条具体的数据有问题，打印出来但不要让整个程序崩溃
-                print(f"⚠️ 跳过一条异常数据: {str(inner_e)}")
+                print(f"⚠️ 处理第 {i} 条数据时发生意外错误: {inner_e}")
+                # 即使这条错了，也不要停，继续下一条
                 continue
 
         if not data_list:
-            return None, "获取到了数据，但在清洗过程中全部被过滤了（可能是格式不兼容）。"
+            return None, "数据清洗后为空。可能所有数据都不符合格式。"
 
         df = pd.DataFrame(data_list)
         df = df.sort_values(by='timestamp', ascending=False)
@@ -78,7 +129,6 @@ def get_binance_futures_history(api_key, api_secret, limit=100):
         return df, "success"
 
     except Exception as e:
-        # 打印详细错误信息方便调试
         import traceback
-        traceback.print_exc()
-        return None, f"连接或处理失败: {str(e)}"
+        traceback.print_exc() # 这会把详细错误印在终端里
+        return None, f"全局错误: {str(e)}"
