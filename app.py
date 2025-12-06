@@ -1,9 +1,11 @@
 import streamlit as st
 import pandas as pd
 import time
+import os
 import plotly.express as px
 from data_engine import TradeDataEngine
 from data_processor import process_trades_to_rounds # 引入核心逻辑
+from word_exporter import WordExporter
 
 # ==============================================================================
 # 1. 全局配置与样式
@@ -152,8 +154,86 @@ with st.sidebar:
                     st.rerun()
                 else:
                     st.error(msg)
+        
+        # --- C. Word 导出功能 (新增) ---
+        with st.expander("📄 导出 Word 报告"):
+            st.markdown("**导出交易复盘报告到 Word 文档**")
+            st.caption("包含交易数据、笔记和截图，可直接发给 AI 分析")
+            
+            export_time_range = st.selectbox(
+                "时间范围",
+                ["最近一周", "最近一月", "最近一年", "全部历史"],
+                key="export_time_range"
+            )
+            
+            # 映射中文到英文
+            time_range_map = {
+                "最近一周": "week",
+                "最近一月": "month",
+                "最近一年": "year",
+                "全部历史": "all"
+            }
+            
+            if st.button("📥 导出 Word 报告", use_container_width=True, type="primary"):
+                if selected_key:
+                    # 加载数据
+                    raw_df = engine.load_trades(selected_key)
                     
-        # --- C. 危险区域 (折叠) ---
+                    if raw_df.empty:
+                        st.error("❌ 暂无数据，请先同步数据。")
+                    else:
+                        # 处理数据
+                        rounds_df = process_trades_to_rounds(raw_df)
+                        
+                        if rounds_df.empty:
+                            st.error("❌ 没有完整的交易记录可导出。")
+                        else:
+                            # 获取 API key tag
+                            key_tag = selected_key.strip()[-4:] if selected_key else ""
+                            
+                            # 创建导出器（默认保存到 D:\TradeReview AI\Trading_Reports）
+                            exporter = WordExporter(
+                                db_path=engine.db_path
+                            )
+                            
+                            # 导出（rounds_df 和 raw_df 已经按账户筛选过了）
+                            with st.spinner("正在生成 Word 文档，请稍候..."):
+                                file_path, message = exporter.export_round_trips_to_word(
+                                    rounds_df,
+                                    raw_df,
+                                    api_key_tag=key_tag,
+                                    time_range=time_range_map[export_time_range]
+                                )
+                            
+                            if file_path:
+                                st.success(message)
+                                
+                                # 显示文件路径（确保是绝对路径）
+                                abs_file_path = os.path.abspath(file_path)
+                                st.info(f"📁 文件位置: {abs_file_path}")
+                                
+                                # 如果是 Windows 路径，额外提示
+                                if os.name == 'nt' and abs_file_path.startswith('D:\\'):
+                                    st.caption(f"💡 提示：文件已保存在 Windows 本地路径")
+                                
+                                # 提供下载按钮
+                                try:
+                                    with open(file_path, 'rb') as f:
+                                        st.download_button(
+                                            label="💾 下载 Word 文档",
+                                            data=f.read(),
+                                            file_name=os.path.basename(file_path),
+                                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                            use_container_width=True
+                                        )
+                                except Exception as e:
+                                    st.warning(f"无法创建下载链接: {e}")
+                            else:
+                                st.error(message)
+                else:
+                    st.warning("请先选择账户。")
+                    
+        # --- D. 危险区域 (折叠) ---
         with st.expander("⚠️ 危险区域"):
             if st.button("🗑️ 删除当前账户", type="primary"):
                 engine.delete_account_full(selected_key)
@@ -175,6 +255,13 @@ with st.sidebar:
 # ==============================================================================
 # 3. 主界面：复盘工作台 (左列表，右详情)
 # ==============================================================================
+
+# 筛选器重置回调函数（必须在组件渲染前定义）
+def reset_filters_callback():
+    """重置所有筛选条件到默认值"""
+    st.session_state.filter_symbol = "全部"
+    st.session_state.filter_strategy = "全部"
+    st.session_state.filter_direction = "全部"
 
 if selected_key:
     # 1. 加载原始数据
@@ -203,6 +290,99 @@ if selected_key:
                     st.rerun()
             
             # ======================================================================
+            # 高级筛选栏 (Advanced Filtering)
+            # ======================================================================
+            st.markdown("---")
+            
+            # 提取所有唯一的币种和策略（从原始数据中提取，用于下拉菜单）
+            all_symbols = sorted([s for s in rounds_df['symbol'].unique() if pd.notna(s) and s])
+            
+            # 从原始数据中提取策略（因为 rounds_df 可能没有策略字段）
+            all_strategies_raw = raw_df['strategy'].dropna().unique()
+            all_strategies = sorted([s for s in all_strategies_raw if s and s.strip()])
+            
+            # 初始化筛选器默认值（如果不存在）
+            if 'filter_symbol' not in st.session_state:
+                st.session_state.filter_symbol = "全部"
+            if 'filter_strategy' not in st.session_state:
+                st.session_state.filter_strategy = "全部"
+            if 'filter_direction' not in st.session_state:
+                st.session_state.filter_direction = "全部"
+            
+            # 筛选栏
+            filter_col1, filter_col2, filter_col3, filter_col4 = st.columns([2, 2, 2, 1])
+            
+            with filter_col1:
+                symbol_options = ["全部"] + all_symbols
+                filter_symbol = st.selectbox(
+                    "🔍 Symbol (币种)",
+                    options=symbol_options,
+                    key="filter_symbol",
+                    help="按币种筛选交易"
+                )
+            
+            with filter_col2:
+                strategy_options = ["全部"] + all_strategies if all_strategies else ["全部"]
+                filter_strategy = st.selectbox(
+                    "📊 Strategy (策略)",
+                    options=strategy_options,
+                    key="filter_strategy",
+                    help="按策略筛选交易"
+                )
+            
+            with filter_col3:
+                direction_options = ["全部", "做多 (Long)", "做空 (Short)"]
+                filter_direction = st.selectbox(
+                    "↕️ Direction (方向)",
+                    options=direction_options,
+                    key="filter_direction",
+                    help="按方向筛选交易"
+                )
+            
+            with filter_col4:
+                st.markdown("<br>", unsafe_allow_html=True)  # 对齐按钮
+                # 使用 on_click 回调函数，而不是在 if 中修改 session_state
+                st.button("🔄 Reset", use_container_width=True, key="reset_filter", on_click=reset_filters_callback)
+            
+            # 应用筛选条件
+            filtered_rounds_df = rounds_df.copy()
+            
+            if filter_symbol != "全部":
+                filtered_rounds_df = filtered_rounds_df[filtered_rounds_df['symbol'] == filter_symbol]
+            
+            if filter_strategy != "全部":
+                # 直接使用 rounds_df 中的 strategy 字段筛选（已通过 data_processor 添加）
+                filtered_rounds_df = filtered_rounds_df[
+                    filtered_rounds_df['strategy'].apply(
+                        lambda x: str(x) == filter_strategy if pd.notna(x) and x else False
+                    )
+                ]
+            
+            if filter_direction != "全部":
+                direction_keyword = "Long" if "Long" in filter_direction else "Short"
+                filtered_rounds_df = filtered_rounds_df[filtered_rounds_df['direction'].str.contains(direction_keyword, na=False)]
+            
+            # 显示筛选状态
+            if filter_symbol != "全部" or filter_strategy != "全部" or filter_direction != "全部":
+                active_filters = []
+                if filter_symbol != "全部":
+                    active_filters.append(f"币种: {filter_symbol}")
+                if filter_strategy != "全部":
+                    active_filters.append(f"策略: {filter_strategy}")
+                if filter_direction != "全部":
+                    active_filters.append(f"方向: {filter_direction}")
+                st.info(f"📌 当前筛选: {', '.join(active_filters)} | 显示 {len(filtered_rounds_df)} 笔交易")
+            
+            st.markdown("---")
+            
+            # 使用筛选后的数据更新 rounds_df
+            rounds_df = filtered_rounds_df
+            
+            if rounds_df.empty:
+                st.warning("⚠️ 没有符合筛选条件的交易。请调整筛选条件。")
+                st.stop()
+            
+            # ======================================================================
             # 手动录入表单（可折叠，在 Dashboard 下方）
             # ======================================================================
             if st.session_state.get('show_add_form', False):
@@ -221,6 +401,14 @@ if selected_key:
                             manual_time = st.time_input("时间", value=pd.Timestamp.now().time(), key="manual_time")
                         
                         manual_strategy = st.text_input("策略 (Strategy)", placeholder="例如：趋势突破", key="manual_strategy")
+                        
+                        # 图片上传
+                        manual_screenshot = st.file_uploader("📸 Chart Screenshot (图表截图)", 
+                                                             type=['png', 'jpg', 'jpeg', 'gif'],
+                                                             key="manual_screenshot")
+                        if manual_screenshot:
+                            st.image(manual_screenshot, caption="预览", width=300)
+                        
                         manual_note = st.text_area("初始笔记 (Note)", placeholder="开仓理由、心理状态...", height=100, key="manual_note")
                         
                         submit_col1, submit_col2, submit_col3 = st.columns([1, 2, 1])
@@ -236,7 +424,7 @@ if selected_key:
                                 # 提取方向（"做多 (Long)" -> "Long"）
                                 direction_clean = "Long" if "Long" in manual_direction else "Short"
                                 
-                                # 调用引擎保存
+                                # 先保存交易，获取 trade_id
                                 success, msg = engine.add_manual_trade(
                                     selected_key,
                                     manual_symbol.upper(),
@@ -246,6 +434,19 @@ if selected_key:
                                     manual_strategy,
                                     manual_note
                                 )
+                                
+                                # 如果有上传图片，保存图片并更新交易记录
+                                if success and manual_screenshot is not None:
+                                    # 获取刚创建的交易ID（通过时间戳匹配）
+                                    import uuid
+                                    timestamp_ms = int(pd.Timestamp(date_time_str).timestamp() * 1000)
+                                    base_id = f"MANUAL_{timestamp_ms}"
+                                    screenshot_filename = engine.save_screenshot(manual_screenshot, base_id)
+                                    if screenshot_filename:
+                                        # 更新开仓记录的截图字段
+                                        engine.update_trade(base_id, selected_key, manual_symbol.upper(), 
+                                                           direction_clean, manual_pnl, date_time_str,
+                                                           manual_strategy, manual_note, screenshot_filename)
                                 
                                 if success:
                                     st.success(msg)
@@ -615,6 +816,20 @@ if selected_key:
                                         edit_time = st.time_input("时间", value=pd.Timestamp.now().time(), key=f"edit_time_{trade['round_id']}")
                                 
                                 edit_strategy = st.text_input("策略 (Strategy)", value=current_strategy, key=f"edit_strategy_{trade['round_id']}")
+                                
+                                # 图片上传
+                                current_screenshot = trade_row.get('screenshot', '')
+                                if pd.notna(current_screenshot) and current_screenshot:
+                                    upload_dir = os.path.join(os.path.dirname(engine.db_path), 'uploads')
+                                    screenshot_path = os.path.join(upload_dir, current_screenshot)
+                                    if os.path.exists(screenshot_path):
+                                        st.image(screenshot_path, caption="当前截图", width=300)
+                                edit_screenshot = st.file_uploader("📸 Chart Screenshot (图表截图)", 
+                                                                   type=['png', 'jpg', 'jpeg', 'gif'],
+                                                                   key=f"edit_screenshot_{trade['round_id']}")
+                                if edit_screenshot:
+                                    st.image(edit_screenshot, caption="新截图预览", width=300)
+                                
                                 edit_note = st.text_area("初始笔记 (Note)", value=current_note, height=100, key=f"edit_note_{trade['round_id']}")
                                 
                                 submit_edit_col1, submit_edit_col2, submit_edit_col3 = st.columns([1, 2, 1])
@@ -626,8 +841,19 @@ if selected_key:
                                     date_time_str = f"{edit_date} {edit_time.strftime('%H:%M')}"
                                     direction_clean = "Long" if "Long" in edit_direction else "Short"
                                     
-                                    # 提取基础ID
-                                    base_id = trade['round_id'].replace('_OPEN', '').replace('_CLOSE', '')
+                                    # 提取基础ID（区分手动录入和 API 导入）
+                                    round_id = trade['round_id']
+                                    if round_id.startswith('MANUAL_'):
+                                        # 手动录入：去掉 _OPEN 或 _CLOSE 后缀
+                                        base_id = round_id.replace('_OPEN', '').replace('_CLOSE', '')
+                                    else:
+                                        # API 导入：round_id 本身就是原始 ID，直接使用
+                                        base_id = round_id
+                                    
+                                    # 处理图片上传
+                                    screenshot_filename = None
+                                    if edit_screenshot is not None:
+                                        screenshot_filename = engine.save_screenshot(edit_screenshot, base_id)
                                     
                                     # 调用更新方法
                                     success, msg = engine.update_trade(
@@ -638,7 +864,8 @@ if selected_key:
                                         edit_pnl,
                                         date_time_str,
                                         edit_strategy,
-                                        edit_note
+                                        edit_note,
+                                        screenshot_filename
                                     )
                                     
                                     if success:
@@ -721,6 +948,17 @@ if selected_key:
                     
                     # 从数据库重新读取最新数据 (确保实时性)
                     trade_row = raw_df[raw_df['id'] == trade['round_id']].iloc[0]
+                    
+                    # 显示截图（如果有）
+                    screenshot_name = trade_row.get('screenshot', '')
+                    if pd.notna(screenshot_name) and screenshot_name:
+                        upload_dir = os.path.join(os.path.dirname(engine.db_path), 'uploads')
+                        screenshot_path = os.path.join(upload_dir, screenshot_name)
+                        if os.path.exists(screenshot_path):
+                            st.markdown("#### 📸 Chart Screenshot (图表截图)")
+                            st.image(screenshot_path, use_container_width=True)
+                            st.markdown("---")
+                    
                     current_note_db = trade_row.get('notes', '')
                     current_strategy_db = trade_row.get('strategy', '')
                     if pd.isna(current_note_db): current_note_db = ""

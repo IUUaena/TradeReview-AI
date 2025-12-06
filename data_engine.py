@@ -39,6 +39,7 @@ class TradeDataEngine:
                 notes TEXT,
                 strategy TEXT,
                 ai_analysis TEXT,
+                screenshot TEXT,
                 UNIQUE(id, api_key_tag)
             )
         ''')
@@ -327,8 +328,8 @@ class TradeDataEngine:
             open_id = f"{base_id}_OPEN"
             c.execute('''
                 INSERT INTO trades 
-                (id, timestamp, datetime, symbol, side, price, amount, cost, fee, fee_currency, pnl, api_key_tag, strategy, notes)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (id, timestamp, datetime, symbol, side, price, amount, cost, fee, fee_currency, pnl, api_key_tag, strategy, notes, screenshot)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 open_id,
                 timestamp_ms,
@@ -343,7 +344,8 @@ class TradeDataEngine:
                 0.0,  # 开仓时盈亏为0
                 key_tag,
                 strategy,
-                note
+                note,
+                None  # 截图在编辑时添加
             ))
             
             # 第二笔：平仓（数量设为1，盈亏为用户输入的值）
@@ -354,8 +356,8 @@ class TradeDataEngine:
             
             c.execute('''
                 INSERT INTO trades 
-                (id, timestamp, datetime, symbol, side, price, amount, cost, fee, fee_currency, pnl, api_key_tag, strategy, notes)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (id, timestamp, datetime, symbol, side, price, amount, cost, fee, fee_currency, pnl, api_key_tag, strategy, notes, screenshot)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 close_id,
                 close_timestamp_ms,
@@ -370,7 +372,8 @@ class TradeDataEngine:
                 float(pnl),  # 平仓时的盈亏（用户输入的总盈亏）
                 key_tag,
                 "",  # 平仓记录不重复策略和笔记
-                ""
+                "",
+                None  # 截图只保存在开仓记录
             ))
             
             conn.commit()
@@ -380,65 +383,137 @@ class TradeDataEngine:
             conn.close()
             return False, f"❌ 录入失败: {str(e)}"
     
-    def update_trade(self, trade_id, api_key, symbol, direction, pnl, date_str, strategy="", note=""):
-        """更新交易（编辑手动录入的交易）"""
+    def save_screenshot(self, uploaded_file, trade_id):
+        """保存上传的截图文件"""
+        try:
+            # 创建上传文件夹
+            upload_dir = os.path.join(os.path.dirname(self.db_path), 'uploads')
+            os.makedirs(upload_dir, exist_ok=True)
+            
+            # 生成安全的文件名
+            timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+            file_extension = uploaded_file.name.split('.')[-1] if '.' in uploaded_file.name else 'png'
+            filename = f"trade_{trade_id}_{timestamp}.{file_extension}"
+            
+            # 保存文件
+            file_path = os.path.join(upload_dir, filename)
+            with open(file_path, 'wb') as f:
+                f.write(uploaded_file.getbuffer())
+            
+            return filename
+        except Exception as e:
+            print(f"Save Screenshot Error: {e}")
+            return None
+    
+    def update_trade(self, trade_id, api_key, symbol, direction, pnl, date_str, strategy="", note="", screenshot_filename=None):
+        """
+        更新交易（支持手动录入和 API 导入的交易）
+        
+        关键修复：
+        - 手动录入：ID 格式为 MANUAL_xxx，需要更新开仓(_OPEN)和平仓(_CLOSE)两笔记录
+        - API 导入：round_id 就是原始的开仓记录 id，只更新策略、笔记和截图（不修改交易所的真实交易数据）
+        """
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
         try:
             key_tag = api_key.strip()[-4:] if api_key else ""
             
-            # 查找交易记录（应该有两笔：开仓和平仓）
-            c.execute("SELECT id FROM trades WHERE id LIKE ? AND api_key_tag = ?", (f"{trade_id}%", key_tag))
-            trade_ids = [row[0] for row in c.fetchall()]
+            # 判断是手动录入还是 API 导入
+            is_manual = trade_id.startswith('MANUAL_')
             
-            if not trade_ids:
+            if is_manual:
+                # ========== 手动录入的交易 ==========
+                # 查找开仓和平仓两笔记录
+                c.execute("SELECT id FROM trades WHERE id LIKE ? AND api_key_tag = ?", (f"{trade_id}%", key_tag))
+                trade_ids = [row[0] for row in c.fetchall()]
+                
+                if not trade_ids:
+                    conn.close()
+                    return False, "❌ 未找到要更新的交易记录"
+                
+                # 将日期字符串转换为时间戳
+                try:
+                    dt_obj = datetime.strptime(date_str, '%Y-%m-%d %H:%M')
+                    timestamp_ms = int(dt_obj.timestamp() * 1000)
+                    datetime_iso = dt_obj.strftime('%Y-%m-%d %H:%M:%S')
+                except:
+                    # 如果日期格式错误，保持原时间戳
+                    c.execute("SELECT timestamp, datetime FROM trades WHERE id = ? AND api_key_tag = ?", 
+                             (trade_ids[0], key_tag))
+                    result = c.fetchone()
+                    if result:
+                        timestamp_ms = result[0]
+                        datetime_iso = result[1]
+                    else:
+                        timestamp_ms = int(datetime.now().timestamp() * 1000)
+                        datetime_iso = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                
+                # 确定 side
+                side = "buy" if direction.lower() == "long" else "sell"
+                close_side = "sell" if side == "buy" else "buy"
+                
+                # 更新开仓记录
+                open_id = [tid for tid in trade_ids if tid.endswith('_OPEN')]
+                if open_id:
+                    if screenshot_filename:
+                        c.execute('''
+                            UPDATE trades 
+                            SET symbol = ?, side = ?, timestamp = ?, datetime = ?, strategy = ?, notes = ?, screenshot = ?
+                            WHERE id = ? AND api_key_tag = ?
+                        ''', (symbol, side, timestamp_ms, datetime_iso, strategy, note, screenshot_filename, open_id[0], key_tag))
+                    else:
+                        c.execute('''
+                            UPDATE trades 
+                            SET symbol = ?, side = ?, timestamp = ?, datetime = ?, strategy = ?, notes = ?
+                            WHERE id = ? AND api_key_tag = ?
+                        ''', (symbol, side, timestamp_ms, datetime_iso, strategy, note, open_id[0], key_tag))
+                
+                # 更新平仓记录（更新盈亏和时间）
+                close_id = [tid for tid in trade_ids if tid.endswith('_CLOSE')]
+                if close_id:
+                    close_timestamp_ms = timestamp_ms + 60000
+                    close_datetime_iso = datetime.fromtimestamp(close_timestamp_ms / 1000).strftime('%Y-%m-%d %H:%M:%S')
+                    c.execute('''
+                        UPDATE trades 
+                        SET symbol = ?, side = ?, timestamp = ?, datetime = ?, pnl = ?
+                        WHERE id = ? AND api_key_tag = ?
+                    ''', (symbol, close_side, close_timestamp_ms, close_datetime_iso, float(pnl), close_id[0], key_tag))
+                
+                conn.commit()
                 conn.close()
-                return False, "❌ 未找到要更新的交易记录"
-            
-            # 将日期字符串转换为时间戳
-            try:
-                dt_obj = datetime.strptime(date_str, '%Y-%m-%d %H:%M')
-                timestamp_ms = int(dt_obj.timestamp() * 1000)
-                datetime_iso = dt_obj.strftime('%Y-%m-%d %H:%M:%S')
-            except:
-                # 如果日期格式错误，保持原时间戳
-                c.execute("SELECT timestamp, datetime FROM trades WHERE id = ? AND api_key_tag = ?", 
-                         (trade_ids[0], key_tag))
-                result = c.fetchone()
-                if result:
-                    timestamp_ms = result[0]
-                    datetime_iso = result[1]
+                return True, "✅ 交易已成功更新！"
+                
+            else:
+                # ========== API 导入的交易 ==========
+                # round_id 就是原始的开仓记录 id
+                # 检查记录是否存在
+                c.execute("SELECT id FROM trades WHERE id = ? AND api_key_tag = ?", (trade_id, key_tag))
+                trade_record = c.fetchone()
+                
+                if not trade_record:
+                    conn.close()
+                    return False, "❌ 未找到要更新的交易记录"
+                
+                # API 导入的交易：只更新策略、笔记和截图（不修改交易所的真实交易数据）
+                # 这样可以保护交易所的真实数据，只允许添加复盘信息
+                if screenshot_filename:
+                    c.execute('''
+                        UPDATE trades 
+                        SET strategy = ?, notes = ?, screenshot = ?
+                        WHERE id = ? AND api_key_tag = ?
+                    ''', (strategy, note, screenshot_filename, trade_id, key_tag))
                 else:
-                    timestamp_ms = int(datetime.now().timestamp() * 1000)
-                    datetime_iso = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            
-            # 确定 side
-            side = "buy" if direction.lower() == "long" else "sell"
-            close_side = "sell" if side == "buy" else "buy"
-            
-            # 更新开仓记录（第一个ID）
-            open_id = [tid for tid in trade_ids if tid.endswith('_OPEN')]
-            if open_id:
-                c.execute('''
-                    UPDATE trades 
-                    SET symbol = ?, side = ?, timestamp = ?, datetime = ?, strategy = ?, notes = ?
-                    WHERE id = ? AND api_key_tag = ?
-                ''', (symbol, side, timestamp_ms, datetime_iso, strategy, note, open_id[0], key_tag))
-            
-            # 更新平仓记录（第二个ID，更新盈亏和时间）
-            close_id = [tid for tid in trade_ids if tid.endswith('_CLOSE')]
-            if close_id:
-                close_timestamp_ms = timestamp_ms + 60000
-                close_datetime_iso = datetime.fromtimestamp(close_timestamp_ms / 1000).strftime('%Y-%m-%d %H:%M:%S')
-                c.execute('''
-                    UPDATE trades 
-                    SET symbol = ?, side = ?, timestamp = ?, datetime = ?, pnl = ?
-                    WHERE id = ? AND api_key_tag = ?
-                ''', (symbol, close_side, close_timestamp_ms, close_datetime_iso, float(pnl), close_id[0], key_tag))
-            
-            conn.commit()
-            conn.close()
-            return True, "✅ 交易已成功更新！"
+                    # 如果没有新截图，保持原有截图
+                    c.execute('''
+                        UPDATE trades 
+                        SET strategy = ?, notes = ?
+                        WHERE id = ? AND api_key_tag = ?
+                    ''', (strategy, note, trade_id, key_tag))
+                
+                conn.commit()
+                conn.close()
+                return True, "✅ 交易复盘信息已成功更新！（API 导入的交易只能更新策略和笔记）"
+                
         except Exception as e:
             conn.close()
             return False, f"❌ 更新失败: {str(e)}"

@@ -98,6 +98,7 @@ def process_trades_to_rounds(df):
                         'trade_count': len(trade_ids),
                         'status': 'Closed',
                         'notes': note_content,
+                        'strategy': strategy_content,  # 添加策略字段
                         'ai_analysis': ai_content
                     })
                     
