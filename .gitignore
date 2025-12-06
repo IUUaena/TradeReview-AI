@@ -1,0 +1,12 @@
+# 忽略数据库文件（保护你的隐私数据和API Key）
+*.db
+*.sqlite3
+
+# 忽略 Python 编译文件
+__pycache__/
+*.pyc
+
+# 忽略环境配置
+.env
+.venv
+
