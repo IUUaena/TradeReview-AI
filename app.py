@@ -92,7 +92,7 @@ if page == "📊 仪表盘":
             
             # --- C. 详细交易列表 (Round Trips) ---
             st.subheader("📝 完整交易记录 (Round Trips)")
-            st.caption("这里将原本零散的买卖记录合并为了完整的"开仓-平仓"回合。")
+            st.caption("这里将原本零散的买卖记录合并为了完整的 '开仓-平仓' 回合。")
             
             # 简单的筛选器
             filter_col1, filter_col2 = st.columns([1, 3])
@@ -137,8 +137,8 @@ elif page == "🔄 数据同步":
         
         # 模式选择
         mode = st.radio("选择同步模式", 
-                        ["🚀 快速扫描 (最近7天)", "⛏️ 深度挖掘 (过去1年)"],
-                        captions=["扫描所有币种，但仅限最近一周。能立刻找回你刚才看到的4条记录。", 
+                        ["🚀 月度扫描 (最近30天)", "⛏️ 深度挖掘 (过去1年)"],
+                        captions=["扫描所有币种，覆盖最近30天。使用分片技术突破7天限制。", 
                                   "突破时间限制！但因为太耗时，需要你指定币种。"])
         
         target_coins = ""
@@ -162,7 +162,7 @@ elif page == "🔄 数据同步":
                 import sqlite3
                 
                 # 判定模式参数
-                api_mode = "recent" if "快速" in mode else "deep"
+                api_mode = "recent" if "月度" in mode else "deep"
                 
                 # 调用后端
                 df, msg = exchange_api.get_binance_data(api_key, api_secret, 
