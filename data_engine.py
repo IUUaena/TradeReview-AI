@@ -2,7 +2,7 @@ import ccxt
 import pandas as pd
 import sqlite3
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 class TradeDataEngine:
     def __init__(self, db_path='trade_review.db'):
@@ -10,11 +10,9 @@ class TradeDataEngine:
         self._init_db()
 
     def _init_db(self):
-        """初始化数据库：确保表结构包含 API Key 字段，用于隔离账户"""
+        """初始化数据库"""
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
-        
-        # 创建交易表，注意我们加了 api_key_tag 字段来区分不同账户的数据
         c.execute('''
             CREATE TABLE IF NOT EXISTS trades (
                 id TEXT,
@@ -37,134 +35,180 @@ class TradeDataEngine:
         conn.commit()
         conn.close()
 
-    def get_exchange_instance(self, api_key, secret, exchange_id='binance'):
-        """初始化交易所实例（强制 U本位合约）"""
+    def get_exchange(self, api_key, secret):
+        """连接币安 U本位合约"""
         try:
-            exchange_class = getattr(ccxt, exchange_id)
-            exchange = exchange_class({
+            exchange = ccxt.binance({
                 'apiKey': api_key,
                 'secret': secret,
                 'timeout': 30000,
                 'enableRateLimit': True,
-                'options': {
-                    'defaultType': 'future'  # 核心：强制指定为合约(Future)交易
-                }
+                'options': {'defaultType': 'future'} 
             })
             return exchange
-        except Exception as e:
+        except:
             return None
 
-    def fetch_and_save_all_history(self, api_key, secret):
-        """
-        核心功能：分页抓取所有历史记录
-        """
-        exchange = self.get_exchange_instance(api_key, secret)
-        if not exchange:
-            return "❌ 交易所连接失败，请检查 API Key"
-        
-        # 生成一个 API Key 的标签（取后4位），用于在数据库里标记数据归属
-        # 这样既能区分账户，又不会明文存储完整的 Key
-        key_tag = api_key[-4:] 
-        all_trades = []
-        
-        # 起始时间：2020年1月1日 (你可以根据需要调整更早)
-        since = exchange.parse8601('2020-01-01T00:00:00Z') 
-        
-        print("🔄 开始全量抓取，这可能需要一点时间...")
-        
-        while True:
-            try:
-                # 每次抓取 1000 条（币安上限）
-                trades = exchange.fetch_my_trades(symbol=None, since=since, limit=1000)
-                
-                if len(trades) == 0:
-                    break
-                    
-                all_trades.extend(trades)
-                
-                # 更新时间游标：取最后一条交易的时间 + 1毫秒，作为下一次抓取的起点
-                since = trades[-1]['timestamp'] + 1
-                
-                # 简单的防死循环：如果抓到了当前时间，就停止
-                if since > exchange.milliseconds():
-                    break
-                    
-                print(f"✅ 已获取 {len(all_trades)} 条记录，正在继续...")
-                
-            except Exception as e:
-                print(f"⚠️ 抓取中断: {e}")
-                break
-        
-        # 保存到数据库
-        count = self._save_to_db(all_trades, key_tag)
-        return f"🎉 成功同步 {count} 条历史交易数据！"
+    def fetch_and_save(self, api_key, secret, mode, target_coins_str=None, progress_callback=None):
+        exchange = self.get_exchange(api_key, secret)
+        if not exchange: return "❌ 交易所连接失败，请检查网络或 Key", 0
 
-    def _save_to_db(self, trades_data, key_tag):
+        key_tag = api_key[-4:]
+        all_trades = []
+
+        try:
+            # 1. 获取所有交易对信息
+            if progress_callback: progress_callback("📡 正在获取币安合约市场列表...", 5)
+            markets = exchange.load_markets()
+            
+            # --- 🚀 核心优化：只保留 USDT 本位合约 ---
+            # 逻辑：必须是合约(swap/future) 且 结算货币是 USDT
+            valid_symbols = []
+            for symbol, market in markets.items():
+                is_contract = market.get('type') in ['future', 'swap'] # 永续或交割
+                is_usdt = market.get('quote') == 'USDT'                # 必须是 USDT 结算
+                # 排除 USDC 本位 或 币本位 (USD)
+                if is_contract and is_usdt:
+                    valid_symbols.append(symbol)
+            
+            print(f"DEBUG: 筛选出 {len(valid_symbols)} 个 USDT 本位合约")
+
+        except Exception as e:
+            return f"❌ 获取市场列表失败: {str(e)}", 0
+
+        # --- 模式 A: 快速扫描 (严格筛选后的名单) ---
+        if mode == 'recent':
+            # 设定时间范围：7天前
+            since_time = int((datetime.now() - timedelta(days=7)).timestamp() * 1000)
+            
+            total_symbols = len(valid_symbols)
+            if progress_callback: progress_callback(f"🚀 准备扫描 {total_symbols} 个 USDT 合约...", 10)
+            
+            for i, symbol in enumerate(valid_symbols):
+                try:
+                    # 进度条优化
+                    if i % 5 == 0 and progress_callback:
+                        pct = 10 + int((i / total_symbols) * 80)
+                        progress_callback(f"🔍 扫描: {symbol} ({i}/{total_symbols})", pct)
+
+                    # 抓取
+                    trades = exchange.fetch_my_trades(symbol=symbol, since=since_time, limit=100)
+                    if trades:
+                        all_trades.extend(trades)
+                        time.sleep(0.05) # 稍微快一点点，因为有些币可能压根没开过单
+                except Exception as e:
+                    continue
+
+        # --- 模式 B: 深度挖掘 (指定币种) ---
+        elif mode == 'deep':
+            if not target_coins_str:
+                return "⚠️ 深度模式必须手动输入币种 (如 BTC, ETH)", 0
+            
+            # 智能匹配用户输入的币种
+            target_symbols = []
+            for s in target_coins_str.split(','):
+                s = s.strip().upper()
+                if not s: continue
+                
+                # 在我们筛选出的 USDT 列表中查找
+                # 比如用户输 BTC，我们找 BTC/USDT:USDT
+                matched = False
+                for v_sym in valid_symbols:
+                    # 匹配逻辑：如果 valid_symbol 包含用户输入的 (例如 BTC/USDT)
+                    if v_sym.startswith(s + "/"):
+                        target_symbols.append(v_sym)
+                        matched = True
+                        break
+                
+                if not matched:
+                    # 如果没找到，尝试硬拼一个最常见的格式
+                    target_symbols.append(f"{s}/USDT")
+
+            one_year_ago = int((datetime.now() - timedelta(days=365)).timestamp() * 1000)
+            
+            for i, symbol in enumerate(target_symbols):
+                msg = f"⛏️ 深度挖掘 {symbol}..."
+                if progress_callback: progress_callback(msg, int((i / len(target_symbols)) * 90))
+                
+                since = one_year_ago
+                while True:
+                    try:
+                        trades = exchange.fetch_my_trades(symbol=symbol, since=since, limit=1000)
+                        if not trades: break
+                        
+                        all_trades.extend(trades)
+                        since = trades[-1]['timestamp'] + 1
+                        
+                        if since > exchange.milliseconds(): break
+                        time.sleep(0.2)
+                    except Exception as e:
+                        print(f"⚠️ {symbol} 抓取中断: {e}")
+                        break
+
+        # --- 入库逻辑 ---
+        if not all_trades:
+            return "✅ 扫描完成，但在指定范围内没有发现新交易。", 0
+
+        if progress_callback: progress_callback(f"💾 正在保存 {len(all_trades)} 条记录...", 95)
+        new_count = self._save_to_db(all_trades, key_tag)
+        
+        if progress_callback: progress_callback("✅ 完成！", 100)
+        return "成功", new_count
+
+    def _save_to_db(self, trades, key_tag):
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
-        new_count = 0
-        
-        for t in trades_data:
-            # 提取我们需要的数据
-            trade_id = t['id']
-            ts = t['timestamp']
-            dt = t['datetime']
-            symbol = t['symbol']
-            side = t['side'] # buy/sell
-            price = t['price']
-            amount = t['amount']
-            cost = t['cost']
-            
-            # 处理手续费
-            fee_cost = 0
-            fee_currency = 'USDT'
-            if t.get('fee'):
-                fee_cost = t['fee'].get('cost', 0)
-                fee_currency = t['fee'].get('currency', 'USDT')
-            
-            # 尝试获取 PnL (盈亏)，币安合约通常在 info 里的 realizedPnl 字段
-            pnl = 0.0
-            if 'info' in t and 'realizedPnl' in t['info']:
-                pnl = float(t['info']['realizedPnl'])
-            
+        count = 0
+        for t in trades:
             try:
-                # 插入数据，如果 ID 重复则忽略 (INSERT OR IGNORE)
+                pnl = 0.0
+                info = t.get('info', {})
+                if info and 'realizedPnl' in info:
+                    pnl = float(info['realizedPnl'])
+                
+                fee_cost = 0.0
+                if t.get('fee') and 'cost' in t['fee']:
+                    fee_cost = float(t['fee']['cost'])
+
+                trade_id = str(t.get('id', ''))
+                ts = t.get('timestamp', 0)
+                dt = t.get('datetime', '')
+                symbol = t.get('symbol', '')
+                side = t.get('side', '')
+                price = float(t.get('price', 0))
+                amount = float(t.get('amount', 0))
+                cost = float(t.get('cost', 0))
+
                 c.execute('''
                     INSERT OR IGNORE INTO trades 
                     (id, timestamp, datetime, symbol, side, price, amount, cost, fee, fee_currency, pnl, api_key_tag)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ''', (trade_id, ts, dt, symbol, side, price, amount, cost, fee_cost, fee_currency, pnl, key_tag))
+                ''', (trade_id, ts, dt, symbol, side, price, amount, cost, fee_cost, 'USDT', pnl, key_tag))
                 
-                if c.rowcount > 0:
-                    new_count += 1
-            except Exception as e:
-                pass
-        
+                if c.rowcount > 0: count += 1
+            except Exception:
+                continue
+
         conn.commit()
         conn.close()
-        return new_count
+        return count
 
     def load_trades(self, api_key):
-        """读取数据：只读取当前 API Key 对应的数据"""
-        if not api_key: return pd.DataFrame()
-        key_tag = api_key[-4:]
-        
         conn = sqlite3.connect(self.db_path)
-        # 按照时间倒序排列，最新的在前面
-        df = pd.read_sql_query("SELECT * FROM trades WHERE api_key_tag = ? ORDER BY timestamp DESC", conn, params=(key_tag,))
+        key_tag = api_key[-4:] if api_key else ""
+        try:
+            df = pd.read_sql_query("SELECT * FROM trades WHERE api_key_tag = ? ORDER BY timestamp DESC", conn, params=(key_tag,))
+        except:
+            df = pd.DataFrame()
         conn.close()
         return df
 
     def delete_account_data(self, api_key):
-        """❌ 毁灭模式：根据 API Key 删除所有相关数据"""
-        if not api_key: return False
-        key_tag = api_key[-4:]
-        
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
+        key_tag = api_key[-4:] if api_key else ""
         c.execute("DELETE FROM trades WHERE api_key_tag = ?", (key_tag,))
-        deleted_rows = c.rowcount
+        row_count = c.rowcount
         conn.commit()
         conn.close()
-        return deleted_rows
-
+        return row_count
