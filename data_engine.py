@@ -229,3 +229,42 @@ class TradeDataEngine:
         except: df = pd.DataFrame()
         conn.close()
         return df
+
+    # ===========================
+    #  📝 笔记与 AI 数据更新
+    # ===========================
+    def update_trade_note(self, trade_id, note_text, api_key=None):
+        """更新交易笔记"""
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        try:
+            if api_key:
+                key_tag = api_key.strip()[-4:]
+                c.execute("UPDATE trades SET notes = ? WHERE id = ? AND api_key_tag = ?", (note_text, trade_id, key_tag))
+            else:
+                c.execute("UPDATE trades SET notes = ? WHERE id = ?", (note_text, trade_id))
+            conn.commit()
+            return True
+        except Exception as e:
+            print(f"Update Note Error: {e}")
+            return False
+        finally:
+            conn.close()
+
+    def update_ai_analysis(self, trade_id, analysis_text, api_key=None):
+        """更新 AI 分析结果"""
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        try:
+            if api_key:
+                key_tag = api_key.strip()[-4:]
+                c.execute("UPDATE trades SET ai_analysis = ? WHERE id = ? AND api_key_tag = ?", (analysis_text, trade_id, key_tag))
+            else:
+                c.execute("UPDATE trades SET ai_analysis = ? WHERE id = ?", (analysis_text, trade_id))
+            conn.commit()
+            return True
+        except Exception as e:
+            print(f"Update AI Error: {e}")
+            return False
+        finally:
+            conn.close()
