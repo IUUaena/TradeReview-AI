@@ -121,3 +121,66 @@ def format_duration(minutes):
         return f"{int(minutes/60)}小时{int(minutes%60)}分"
     else:
         return f"{int(minutes/1440)}天{int((minutes%1440)/60)}小时"
+
+def calc_price_action_stats(candles_df, trade_direction, entry_price, exit_price, open_ts, close_ts):
+    """计算 MAE/MFE 核心指标"""
+    if candles_df is None or candles_df.empty:
+        return None
+    
+    # === 🟢 核心修复：给过滤加一个 5分钟的"宽容度" ===
+    # 这样 10:00 的 K 线就能匹配 10:02 的开仓时间了
+    tolerance = 5 * 60 * 1000  # 5分钟的毫秒数
+    
+    mask = (candles_df['timestamp'] >= (open_ts - tolerance)) & \
+           (candles_df['timestamp'] <= close_ts)
+    
+    period_df = candles_df.loc[mask]
+    # === 修复结束 ===
+    
+    if period_df.empty: 
+        # 兜底：如果还是空的，强行取离得最近的 1 根
+        # 这样至少不会报错，能算出个大概
+        # 找到和 open_ts 差值最小的那一行
+        if not candles_df.empty:
+            closest_idx = (candles_df['timestamp'] - open_ts).abs().idxmin()
+            period_df = candles_df.loc[[closest_idx]]
+        else:
+            # 如果整个 DataFrame 都是空的，返回 None
+            return None
+    
+    # 2. 获取期间最高价和最低价
+    period_high = period_df['high'].max()
+    period_low = period_df['low'].min()
+    
+    mae = 0.0  # 最大不利 (浮亏)
+    mfe = 0.0  # 最大有利 (浮盈)
+    
+    if "Long" in trade_direction:
+        # 做多：低点是浮亏，高点是浮盈
+        mae_price = period_low
+        mfe_price = period_high
+        
+        mae = (mae_price - entry_price) / entry_price * 100
+        mfe = (mfe_price - entry_price) / entry_price * 100
+    else:
+        # 做空：高点是浮亏，低点是浮盈
+        mae_price = period_high
+        mfe_price = period_low
+        
+        # 做空：价格涨了是亏(负数)，跌了是赚(正数)
+        mae = (entry_price - mae_price) / entry_price * 100
+        mfe = (entry_price - mfe_price) / entry_price * 100
+    
+    # 3. 计算最终盈亏 (ETD: End Trade Drawdown)
+    # 比如 MFE 是 +5%，最后平仓只赚了 +1%，说明回撤了 4%
+    final_pnl_pct = (exit_price - entry_price) / entry_price * 100 if "Long" in trade_direction else (entry_price - exit_price) / entry_price * 100
+    etd = mfe - final_pnl_pct 
+    
+    return {
+        "MAE": mae,  # 负数，例如 -1.5%
+        "MFE": mfe,  # 正数，例如 +3.0%
+        "ETD": etd,  # 回撤幅度
+        "High": period_high,
+        "Low": period_low,
+        "Charts": period_df  # 返回数据用于画图
+    }

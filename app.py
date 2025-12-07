@@ -1238,14 +1238,93 @@ if selected_key:
                     
                     st.markdown("---")
                     
+                    # 从数据库重新读取最新数据 (确保实时性，价格行为分析需要用到)
+                    trade_row = raw_df[raw_df['id'] == trade['round_id']].iloc[0]
+                    
+                    # ==================================================================
+                    # 🔬 价格行为透视 (v4.0 新功能)
+                    # ==================================================================
+                    st.divider()
+                    st.markdown("### 🔬 Price Action (过程还原)")
+                    
+                    # 检查是否已有数据
+                    has_pa_data = False
+                    raw_mae = trade_row.get('mae')  # 从原始数据读
+                    if raw_mae is not None and str(raw_mae) != 'nan':
+                        has_pa_data = True
+                    
+                    pa_col1, pa_col2 = st.columns([1, 3])
+                    with pa_col1:
+                        btn_label = "🚀 重新计算过程" if has_pa_data else "🚀 还原持仓过程"
+                        if st.button(btn_label, key=f"btn_pa_{trade['round_id']}", help="拉取 K 线，计算你扛了多少单，是否卖飞"):
+                            st.session_state[f"show_pa_{trade['round_id']}"] = True
+                    
+                    # 自动显示（如果有点过按钮 或者 数据库里已经有数据）
+                    if st.session_state.get(f"show_pa_{trade['round_id']}", False) or has_pa_data:
+                        # 如果是点击按钮，就实时计算
+                        if st.session_state.get(f"show_pa_{trade['round_id']}", False):
+                            with st.spinner("正在从交易所拉取历史 K 线并存档..."):
+                                # 1. 估算入场价 (用原始记录的 price)
+                                entry_price = float(trade_row['price'])
+                                # 估算平仓价 (用 PnL 反推太复杂，暂用 K 线收盘价替代)
+                                
+                                candles, msg = engine.get_candles_for_trade(
+                                    selected_key, selected_secret, 
+                                    trade['symbol'], trade['open_time'], trade['close_time']
+                                )
+                                
+                                if candles is not None:
+                                    exit_price = candles.iloc[-1]['close']  # 简化处理
+                                    from data_processor import calc_price_action_stats
+                                    stats = calc_price_action_stats(
+                                        candles, trade['direction'], entry_price, exit_price,
+                                        trade['open_time'], trade['close_time']
+                                    )
+                                    
+                                    if stats:
+                                        # 2. 【核心】自动保存到数据库
+                                        save_data = {
+                                            'mae': float(stats['MAE']),
+                                            'mfe': float(stats['MFE']),
+                                            'etd': float(stats['ETD'])
+                                        }
+                                        base_id = trade['round_id'].replace('_OPEN', '').replace('_CLOSE', '')
+                                        engine.update_trade_extended(base_id, selected_key, save_data)
+                                        
+                                        # 刷新页面以显示存好的数据
+                                        st.session_state[f"show_pa_{trade['round_id']}"] = False 
+                                        st.rerun()
+                                    
+                                    else:
+                                        st.error("❌ 计算失败：stats 为 None")
+                                else:
+                                    st.error(f"❌ K线获取失败: {msg}")
+                        
+                        # 展示数据 (直接读库)
+                        if has_pa_data:
+                            curr_mae = float(trade_row.get('mae', 0))
+                            curr_mfe = float(trade_row.get('mfe', 0))
+                            curr_etd = float(trade_row.get('etd', 0))
+                            
+                            m1, m2, m3 = st.columns(3)
+                            m1.metric("💔 MAE (最大浮亏)", f"{curr_mae:.2f}%", help="持仓期间最惨亏了多少")
+                            m2.metric("💰 MFE (最大浮盈)", f"{curr_mfe:.2f}%", help="持仓期间最高赚了多少")
+                            m3.metric("📉 卖飞/回撤", f"{curr_etd:.2f}%", help="利润回吐幅度")
+                            
+                            # 简单的 AI 规则提示
+                            if curr_mae < -3.0:
+                                st.warning(f"⚠️ 警报：你扛了 {curr_mae:.2f}% 的亏损！如果你的止损是 2%，说明你在死扛。")
+                            if curr_etd > 50.0:
+                                st.warning(f"⚠️ 遗憾：你卖飞了。本来赚 {curr_mfe:.2f}%，最后回吐了大部分利润。")
+                    
+                    st.markdown("---")
+                    
                     # ==================================================================
                     # 2. 深度复盘工作台 (v3.0 Pro)
                     # ==================================================================
                     st.markdown("### 🧘 Deep Review (深度复盘)")
                     
-                    # 从数据库重新读取最新数据 (确保实时性)
-                    trade_row = raw_df[raw_df['id'] == trade['round_id']].iloc[0]
-                    
+                    # trade_row 已在价格行为分析部分定义，这里不需要重复定义
                     # 获取现有数据 (如果没有则设为默认值)
                     curr_strategy = trade_row.get('strategy', '') or ""
                     curr_note = trade_row.get('notes', '') or ""

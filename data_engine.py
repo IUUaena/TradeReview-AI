@@ -895,7 +895,9 @@ class TradeDataEngine:
             allowed_fields = [
                 'symbol', 'side', 'timestamp', 'datetime', 'pnl', # 基础数据(手动单可改)
                 'strategy', 'notes', 'screenshot', 'ai_analysis', # v2.0 字段
-                'mental_state', 'rr_ratio', 'setup_rating', 'process_tag', 'mistake_tags' # v3.0 新字段
+                'mental_state', 'rr_ratio', 'setup_rating', 'process_tag', 'mistake_tags', # v3.0 新字段
+                # === 新增 v4.0 字段 ===
+                'mae', 'mfe', 'etd'
             ]
             
             # 过滤无效字段
@@ -956,3 +958,41 @@ class TradeDataEngine:
             return False, f"❌ 更新失败: {str(e)}"
         finally:
             conn.close()
+    
+    # ===========================
+    #  📈 K线数据获取 (v4.0 MAE/MFE)
+    # ===========================
+    def get_candles_for_trade(self, api_key, secret, symbol, start_ts, end_ts):
+        """
+        获取指定时间段的 5m K线数据 (v4.0 修正版)
+        适配：1小时 ~ 3天 的波段交易
+        """
+        exchange = self.get_exchange(api_key, secret)
+        if not exchange:
+            return None, "交易所连接失败"
+        try:
+            # 缓冲 15 分钟 (前后各多取 3 根 5m K线，看清起步动作)
+            buffer_ms = 15 * 60 * 1000
+            since = start_ts - buffer_ms
+            
+            # Binance 限制单次 1000 根
+            # 5m K线：3天 ≈ 864根，完全在限制内，无需分页
+            limit = 1000 
+            
+            # 🌟 核心修改：timeframe 改为 '5m'
+            ohlcv = exchange.fetch_ohlcv(symbol, timeframe='5m', since=since, limit=limit)
+            
+            # 转 DataFrame
+            if not ohlcv:
+                return None, "未获取到 K 线数据"
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
+            
+            # === 🚩 删除长度检查：短线交易可能只有 3-4 根 5m K线，也是正常的 ===
+            # 直接返回，哪怕只有 1 根也要
+            if df.empty:
+                return None, "未获取到K线数据"
+            
+            return df, "OK"
+        except Exception as e:
+            return None, f"K线获取失败: {str(e)}"

@@ -6,6 +6,20 @@ import mimetypes
 import os
 
 def get_client(api_key, base_url):
+    """
+    获取 OpenAI 客户端，并针对 Google Gemini 做特殊兼容处理
+    """
+    # 针对 Google Gemini 的防御性 URL 修正
+    if "generativelanguage" in base_url:
+        # 移除末尾斜杠，防止双重斜杠
+        clean_url = base_url.rstrip('/')
+        # 如果用户只填了 .../v1beta，自动补全 /openai/
+        if "openai" not in clean_url:
+            clean_url += "/openai/"
+        # 如果用户填了 .../openai，确保后面有斜杠 (Python openai 库的特性)
+        if clean_url.endswith("openai"):
+            clean_url += "/"
+        base_url = clean_url
     return OpenAI(api_key=api_key, base_url=base_url)
 
 # 新增：图片转 Base64 辅助函数
@@ -44,10 +58,29 @@ def audit_single_trade(api_key, base_url, trade_data, system_manifesto="", strat
         t = trade_data
         pnl_emoji = "💰 盈利" if t.get('net_pnl', 0) > 0 else "💸 亏损"
         
+        # === 新增：解析 MAE/MFE ===
+        # 从数据库读出来的可能是 None，给个默认值
+        mae = t.get('mae')
+        mfe = t.get('mfe')
+        etd = t.get('etd')
+        
+        pa_info = ""
+        if mae is not None and mfe is not None:
+            pa_info = f"""
+        【价格行为分析 (机器实测)】
+        - 最大浮亏 (MAE): {float(mae):.2f}% (如果亏损很小但止损设很大，说明止损不合理)
+        - 最大浮盈 (MFE): {float(mfe):.2f}% (曾经拿到过这么多利润)
+        - 利润回撤 (ETD): {float(etd):.2f}% (从最高点回撤了多少才离场)
+        """
+        else:
+            pa_info = "【价格行为】: 数据未计算 (请先在前端点击'还原持仓过程')"
+        
         context_text = f"""
         【交易档案】
         - 标的/方向: {t.get('symbol', 'N/A')} ({t.get('direction', 'N/A')})
         - 结果: {pnl_emoji} ${t.get('net_pnl', 0):.2f}
+        
+        {pa_info}
         
         【自我评估】
         - 策略: {t.get('strategy', '未填写')}
@@ -61,17 +94,20 @@ def audit_single_trade(api_key, base_url, trade_data, system_manifesto="", strat
         strategy_part = f"【策略定义】: {strategy_rules}" if strategy_rules else ""
         
         system_prompt = f"""
-        你是一名拥有鹰眼的【交易审计师】。你的核心能力是结合【K线图表】和【交易员笔记】进行交叉验证。
+        你是一名拥有鹰眼的【交易审计师】。你的核心能力是结合【K线图表】、【价格行为数据】和【交易员笔记】进行交叉验证。
         
         {manifesto_part}
         {strategy_part}
         
         请执行以下审计：
-        1. **图文一致性**：交易员说的"突破/回调"在图表上真的存在吗？(如果看不到图，请忽略此条)
-        2. **技术面诊断**：指出入场点是否过早/过晚？
-        3. **情绪验证**：图表上是否显示出了追涨杀跌的痕迹？
+        1. **数据打脸验证**：对比交易员的笔记和客观的 MAE/MFE 数据。
+           - 如果他说"严格止损"，但 MAE 显示他扛单了 10%，请狠狠批评。
+           - 如果他说"止盈完美"，但 MFE 显示他卖飞了 50%，请指出他的短视。
+           - 如果利润回撤 (ETD) 超过 50%，请警告他"过山车"风险。
+        2. **图文一致性**：(如有图) 验证入场逻辑。
+        3. **情绪验证**：寻找知行不一的迹象。
         
-        注意：如果无法查看图片，请仅基于文本进行逻辑审计。
+        注意：如果无法查看图片，请侧重分析 MAE/MFE 数据。
         """
         
         messages = [{"role": "system", "content": system_prompt}]
@@ -154,7 +190,7 @@ def generate_batch_review_v3(api_key, base_url, trades_df, system_manifesto="", 
         fomo_count = len(trades_df[trades_df['mental_state'].str.contains("FOMO|Tilt|Revenge", na=False, case=False)])
         process_adherence = (good_process_count / total_trades) * 100 if total_trades > 0 else 0
         
-        # 2. 构建精简摘要 (只发 AI 需要的模式识别数据)
+        # 2. 构建精简摘要 (新增 MAE/MFE)
         trades_summary = []
         for _, t in trades_df.iterrows():
             close_date_str = str(t.get('close_date_str', ''))
@@ -165,11 +201,18 @@ def generate_batch_review_v3(api_key, base_url, trades_df, system_manifesto="", 
             
             pnl_sign = "+" if t.get('net_pnl', 0) > 0 else ""
             
-            # 格式: [时间] 盈亏 | 心态 | 执行 | 错误
+            # 格式化 MAE/MFE
+            mae_val = t.get('mae')
+            mfe_val = t.get('mfe')
+            pa_str = ""
+            if mae_val is not None and str(mae_val) != 'nan':
+                pa_str = f"| MAE:{float(mae_val):.1f}% MFE:{float(mfe_val):.1f}%"
+            
+            # 格式: [时间] 盈亏 | 心态 | 执行 | MAE/MFE
             line = (f"[{short_time}] {pnl_sign}{t.get('net_pnl', 0):.0f}U | "
                     f"心态:{t.get('mental_state', '-')} | "
-                    f"执行:{t.get('process_tag', '-')} | "
-                    f"错:{t.get('mistake_tags', '')}")
+                    f"执行:{t.get('process_tag', '-')} "
+                    f"{pa_str}")
             trades_summary.append(line)
         
         trades_text = "\n".join(trades_summary)
