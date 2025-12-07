@@ -68,3 +68,9 @@ desktop.ini
 temp/
 tmp/
 
+# ============================================
+# Docker 相关
+# ============================================
+.dockerignore.backup
+docker-compose.override.yml
+

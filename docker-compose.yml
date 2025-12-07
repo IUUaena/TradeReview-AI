@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  trade-review-ai:
+    build: .
+    container_name: trade-review-ai
+    ports:
+      - "8501:8501"
+    volumes:
+      # 挂载数据库文件，确保数据持久化
+      - ./trade_review.db:/app/trade_review.db
+      # 挂载上传文件目录
+      - ./uploads:/app/uploads
+    restart: unless-stopped
+    environment:
+      - STREAMLIT_SERVER_HEADLESS=true
+      - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+

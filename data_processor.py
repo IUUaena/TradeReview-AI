@@ -127,25 +127,22 @@ def calc_price_action_stats(candles_df, trade_direction, entry_price, exit_price
     if candles_df is None or candles_df.empty:
         return None
     
-    # === 🟢 核心修复：给过滤加一个 5分钟的"宽容度" ===
-    # 这样 10:00 的 K 线就能匹配 10:02 的开仓时间了
-    tolerance = 5 * 60 * 1000  # 5分钟的毫秒数
-    
-    mask = (candles_df['timestamp'] >= (open_ts - tolerance)) & \
-           (candles_df['timestamp'] <= close_ts)
+    # 1m K线：只需要很小的 buffer (1分钟 = 60000ms)
+    # 只要包含 open_ts 所在的这一分钟即可
+    # K线 timestamp 是开盘时间。例如 10:02:00 的 K线覆盖 10:02:00 ~ 10:02:59
+    # 如果 open_ts 是 10:02:30，那么我们需要 10:02:00 这根线
+    # 简单粗暴的有效逻辑：找这段时间内的所有K线
+    mask = (candles_df['timestamp'] >= (open_ts - 60000)) & \
+           (candles_df['timestamp'] <= (close_ts + 60000))
     
     period_df = candles_df.loc[mask]
-    # === 修复结束 ===
     
-    if period_df.empty: 
-        # 兜底：如果还是空的，强行取离得最近的 1 根
-        # 这样至少不会报错，能算出个大概
-        # 找到和 open_ts 差值最小的那一行
+    if period_df.empty:
+        # 兜底：离得最近的一根
         if not candles_df.empty:
             closest_idx = (candles_df['timestamp'] - open_ts).abs().idxmin()
             period_df = candles_df.loc[[closest_idx]]
         else:
-            # 如果整个 DataFrame 都是空的，返回 None
             return None
     
     # 2. 获取期间最高价和最低价

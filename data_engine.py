@@ -13,7 +13,8 @@ class TradeDataEngine:
             basedir = os.path.abspath(os.path.dirname(__file__))
             # 数据库文件固定放在脚本目录下，文件名固定为 trade_review.db
             db_path = os.path.join(basedir, 'trade_review.db')
-            print(f"📁 数据库锁定位置: {db_path}")  # 启动时打印路径以便调试
+            # 启动时打印路径以便调试 (Windows控制台可能不支持emoji，使用纯文本)
+            print(f"数据库锁定位置: {db_path}")
         self.db_path = db_path
         self._init_db()
 
@@ -46,6 +47,10 @@ class TradeDataEngine:
                 setup_rating INTEGER,
                 process_tag TEXT,
                 mistake_tags TEXT,
+                -- v4.0 新增价格行为字段 --
+                mae REAL,
+                mfe REAL,
+                etd REAL,
                 UNIQUE(id, api_key_tag)
             )
         ''')
@@ -264,7 +269,9 @@ class TradeDataEngine:
                         if trades: 
                             all_trades.extend(trades)
                             time.sleep(0.05) 
-                    except: continue
+                    except Exception as e:
+                        print(f"⚠️ 抓取 {symbol} 失败: {e}")  # 打印错误
+                        continue
 
             # --- 模式 B: 深度 (最近1年倒序) ---
             elif mode == 'deep':
@@ -299,7 +306,8 @@ class TradeDataEngine:
                             current_end = current_start
                             if current_end <= stop_ts: break
                             time.sleep(0.3)
-                        except:
+                        except Exception as e:
+                            print(f"⚠️ Deep抓取失败: {e}")
                             current_end = current_start 
                             time.sleep(1)
 
@@ -397,7 +405,9 @@ class TradeDataEngine:
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (str(t['id']), t['timestamp'], t['datetime'], t['symbol'], t['side'], float(t['price'] or 0), float(t['amount'] or 0), float(t['cost'] or 0), fee, 'USDT', pnl, key_tag))
                 if c.rowcount > 0: count += 1
-            except: continue
+            except Exception as e:
+                print(f"❌ 写入单条数据失败: {e}")  # 打印错误
+                continue
         conn.commit()
         conn.close()
         return count
@@ -964,32 +974,23 @@ class TradeDataEngine:
     # ===========================
     def get_candles_for_trade(self, api_key, secret, symbol, start_ts, end_ts):
         """
-        获取指定时间段的 5m K线数据 (v4.0 修正版)
-        适配：1小时 ~ 3天 的波段交易
+        获取指定时间段的 1m K线数据 (稳定回归版)
         """
         exchange = self.get_exchange(api_key, secret)
         if not exchange:
             return None, "交易所连接失败"
         try:
-            # 缓冲 15 分钟 (前后各多取 3 根 5m K线，看清起步动作)
-            buffer_ms = 15 * 60 * 1000
+            # 缓冲 5 分钟 (足够 1m K线用了)
+            buffer_ms = 5 * 60 * 1000
             since = start_ts - buffer_ms
-            
-            # Binance 限制单次 1000 根
-            # 5m K线：3天 ≈ 864根，完全在限制内，无需分页
             limit = 1000 
             
-            # 🌟 核心修改：timeframe 改为 '5m'
-            ohlcv = exchange.fetch_ohlcv(symbol, timeframe='5m', since=since, limit=limit)
+            # 🌟 改回 '1m'
+            ohlcv = exchange.fetch_ohlcv(symbol, timeframe='1m', since=since, limit=limit)
             
-            # 转 DataFrame
-            if not ohlcv:
-                return None, "未获取到 K 线数据"
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
             
-            # === 🚩 删除长度检查：短线交易可能只有 3-4 根 5m K线，也是正常的 ===
-            # 直接返回，哪怕只有 1 根也要
             if df.empty:
                 return None, "未获取到K线数据"
             

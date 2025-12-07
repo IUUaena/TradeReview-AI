@@ -1242,35 +1242,31 @@ if selected_key:
                     trade_row = raw_df[raw_df['id'] == trade['round_id']].iloc[0]
                     
                     # ==================================================================
-                    # 🔬 价格行为透视 (v4.0 新功能)
+                    # 🔬 价格行为透视 (v4.0 1m稳定版)
                     # ==================================================================
                     st.divider()
                     st.markdown("### 🔬 Price Action (过程还原)")
                     
-                    # 检查是否已有数据
                     has_pa_data = False
-                    raw_mae = trade_row.get('mae')  # 从原始数据读
+                    raw_mae = trade_row.get('mae')
                     if raw_mae is not None and str(raw_mae) != 'nan':
                         has_pa_data = True
                     
                     pa_col1, pa_col2 = st.columns([1, 3])
                     with pa_col1:
-                        btn_label = "🚀 重新计算过程" if has_pa_data else "🚀 还原持仓过程"
-                        if st.button(btn_label, key=f"btn_pa_{trade['round_id']}", help="拉取 K 线，计算你扛了多少单，是否卖飞"):
+                        btn_label = "🚀 重新计算" if has_pa_data else "🚀 还原过程 (1m)"
+                        if st.button(btn_label, key=f"btn_pa_{trade['round_id']}"):
                             st.session_state[f"show_pa_{trade['round_id']}"] = True
                     
-                    # 自动显示（如果有点过按钮 或者 数据库里已经有数据）
                     if st.session_state.get(f"show_pa_{trade['round_id']}", False) or has_pa_data:
-                        # 如果是点击按钮，就实时计算
                         if st.session_state.get(f"show_pa_{trade['round_id']}", False):
-                            with st.spinner("正在从交易所拉取历史 K 线并存档..."):
+                            with st.spinner("正在获取 1分钟 K线..."):
                                 # 1. 估算入场价 (用原始记录的 price)
                                 entry_price = float(trade_row['price'])
                                 
-                                # === 🛡️ 防御性检查：防止手动录入的交易价格为0导致除零错误 ===
                                 if entry_price <= 0:
-                                    st.error("❌ 无法计算：入场价为 0 (可能是手动录入且未填写价格)。请先编辑交易补充价格。")
-                                    st.stop()  # 停止执行
+                                    st.error("❌ 无法计算：入场价为 0 (可能是手动录入未填价格)。")
+                                    st.stop()
                                 
                                 candles, msg = engine.get_candles_for_trade(
                                     selected_key, selected_secret, 
@@ -1301,17 +1297,14 @@ if selected_key:
                                         success, save_msg = engine.update_trade_extended(base_id, selected_key, save_data)
                                         
                                         if success:
-                                            st.success("✅ 计算并保存成功！页面即将刷新...")
+                                            st.success("✅ 计算并保存成功！")
                                             st.session_state[f"show_pa_{trade['round_id']}"] = False 
-                                            time.sleep(1.5)  # 暂停一下让你看到成功提示
+                                            time.sleep(1)
                                             st.rerun()
                                         else:
-                                            # 💥 如果保存失败，显示红字错误，且不刷新页面
                                             st.error(f"❌ 保存失败: {save_msg}")
-                                            st.warning("可能原因：数据库缺少 mae/mfe 字段。请务必运行 update_db_v4.py！")
-                                    
                                     else:
-                                        st.error("❌ 计算失败：K线数据可能被过滤为空。请检查 data_processor.py 的过滤逻辑。")
+                                        st.error("❌ 计算失败：K线时间匹配为空")
                                 else:
                                     st.error(f"❌ K线获取失败: {msg}")
                         
@@ -1322,15 +1315,9 @@ if selected_key:
                             curr_etd = float(trade_row.get('etd', 0))
                             
                             m1, m2, m3 = st.columns(3)
-                            m1.metric("💔 MAE (最大浮亏)", f"{curr_mae:.2f}%", help="持仓期间最惨亏了多少")
-                            m2.metric("💰 MFE (最大浮盈)", f"{curr_mfe:.2f}%", help="持仓期间最高赚了多少")
-                            m3.metric("📉 卖飞/回撤", f"{curr_etd:.2f}%", help="利润回吐幅度")
-                            
-                            # 简单的 AI 规则提示
-                            if curr_mae < -3.0:
-                                st.warning(f"⚠️ 警报：你扛了 {curr_mae:.2f}% 的亏损！如果你的止损是 2%，说明你在死扛。")
-                            if curr_etd > 50.0:
-                                st.warning(f"⚠️ 遗憾：你卖飞了。本来赚 {curr_mfe:.2f}%，最后回吐了大部分利润。")
+                            m1.metric("💔 MAE", f"{curr_mae:.2f}%", help="最大浮亏")
+                            m2.metric("💰 MFE", f"{curr_mfe:.2f}%", help="最大浮盈")
+                            m3.metric("📉 回撤", f"{curr_etd:.2f}%", help="利润回吐")
                     
                     st.markdown("---")
                     

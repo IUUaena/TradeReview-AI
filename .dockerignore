@@ -1,0 +1,16 @@
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+.git
+.gitignore
+*.db
+*.db-journal
+.DS_Store
+*.log
+.vscode
+.idea
+*.md
+!README.md
+
