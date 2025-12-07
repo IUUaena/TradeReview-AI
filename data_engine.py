@@ -21,7 +21,7 @@ class TradeDataEngine:
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
         
-        # 1. 交易数据表 (保持不变)
+        # 1. 交易数据表 (v3.0 增强版)
         c.execute('''
             CREATE TABLE IF NOT EXISTS trades (
                 id TEXT,
@@ -40,6 +40,12 @@ class TradeDataEngine:
                 strategy TEXT,
                 ai_analysis TEXT,
                 screenshot TEXT,
+                -- v3.0 新增核心字段 --
+                mental_state TEXT,
+                rr_ratio REAL,
+                setup_rating INTEGER,
+                process_tag TEXT,
+                mistake_tags TEXT,
                 UNIQUE(id, api_key_tag)
             )
         ''')
@@ -50,6 +56,22 @@ class TradeDataEngine:
                 api_key TEXT PRIMARY KEY,
                 secret TEXT,
                 alias TEXT
+            )
+        ''')
+        
+        # 3. [新增] AI 阶段性报告表
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS ai_reports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                report_type TEXT,      -- 'WEEKLY', 'MONTHLY', 'BATCH_30'
+                start_date TEXT,
+                end_date TEXT,
+                trade_count INTEGER,
+                total_pnl REAL,
+                win_rate REAL,
+                ai_feedback TEXT,      -- AI 的完整分析报告
+                created_at INTEGER,    -- 生成时间
+                api_key_tag TEXT
             )
         ''')
         
@@ -543,3 +565,127 @@ class TradeDataEngine:
         except Exception as e:
             conn.close()
             return False, f"❌ 删除失败: {str(e)}"
+    
+    # ===========================
+    #  🧠 AI 报告管理 (新增)
+    # ===========================
+    
+    def save_ai_report(self, report_type, start_date, end_date, trade_count, total_pnl, win_rate, ai_feedback, api_key):
+        """保存 AI 生成的阶段性报告"""
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        try:
+            key_tag = api_key.strip()[-4:] if api_key else "MANU"
+            created_at = int(datetime.now().timestamp() * 1000)
+            
+            c.execute('''
+                INSERT INTO ai_reports 
+                (report_type, start_date, end_date, trade_count, total_pnl, win_rate, ai_feedback, created_at, api_key_tag)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (report_type, start_date, end_date, trade_count, total_pnl, win_rate, ai_feedback, created_at, key_tag))
+            
+            conn.commit()
+            return True, "✅ 报告已归档"
+        except Exception as e:
+            return False, f"保存失败: {str(e)}"
+        finally:
+            conn.close()
+    
+    def get_ai_reports(self, api_key, limit=10):
+        """获取历史分析报告"""
+        conn = sqlite3.connect(self.db_path)
+        key_tag = api_key.strip()[-4:] if api_key else "MANU"
+        try:
+            df = pd.read_sql_query(
+                "SELECT * FROM ai_reports WHERE api_key_tag = ? ORDER BY created_at DESC LIMIT ?", 
+                conn, params=(key_tag, limit)
+            )
+        except:
+            df = pd.DataFrame()
+        conn.close()
+        return df
+    
+    # ===========================
+    #  🎯 v3.0 深度复盘数据更新 (新增)
+    # ===========================
+    
+    def update_trade_extended(self, trade_id, api_key, update_data):
+        """
+        v3.0 核心更新接口：支持更新所有复盘字段 (字典传参)
+        :param trade_id: 交易ID
+        :param api_key: API Key (用于权限验证和区分账户)
+        :param update_data: 字典，例如 {'mental_state': 'FOMO', 'notes': '...'}
+        """
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        try:
+            key_tag = api_key.strip()[-4:] if api_key else ""
+            
+            # 1. 确定是手动录入还是 API 导入
+            is_manual = str(trade_id).startswith('MANUAL_')
+            
+            # 2. 定义允许更新的字段白名单 (安全防护)
+            allowed_fields = [
+                'symbol', 'side', 'timestamp', 'datetime', 'pnl', # 基础数据(手动单可改)
+                'strategy', 'notes', 'screenshot', 'ai_analysis', # v2.0 字段
+                'mental_state', 'rr_ratio', 'setup_rating', 'process_tag', 'mistake_tags' # v3.0 新字段
+            ]
+            
+            # 过滤无效字段
+            fields_to_update = {k: v for k, v in update_data.items() if k in allowed_fields}
+            
+            if not fields_to_update:
+                return False, "⚠️ 没有有效的数据需要更新"
+            
+            # 3. 执行更新
+            if is_manual:
+                # === 手动录入逻辑 (需同时处理 _OPEN 和 _CLOSE) ===
+                # 我们约定：复盘数据主要存在 _OPEN 记录上 (因为是开仓时的决策)
+                
+                # 查找对应的开仓记录ID
+                # 如果传入的是 base_id (无后缀)，加上 _OPEN
+                # 如果传入的已经是完整ID，判断后缀
+                target_open_id = trade_id
+                if not trade_id.endswith('_OPEN') and not trade_id.endswith('_CLOSE'):
+                    target_open_id = f"{trade_id}_OPEN"
+                elif trade_id.endswith('_CLOSE'):
+                    target_open_id = trade_id.replace('_CLOSE', '_OPEN')
+                
+                # 更新 _OPEN 记录 (存复盘数据)
+                set_clause = ", ".join([f"{col} = ?" for col in fields_to_update.keys()])
+                values = list(fields_to_update.values())
+                values.extend([target_open_id, key_tag])
+                
+                c.execute(f"UPDATE trades SET {set_clause} WHERE id = ? AND api_key_tag = ?", values)
+                
+                # 如果修改了 PnL，还需要同步更新 _CLOSE 记录
+                if 'pnl' in fields_to_update:
+                    target_close_id = target_open_id.replace('_OPEN', '_CLOSE')
+                    c.execute("UPDATE trades SET pnl = ? WHERE id = ? AND api_key_tag = ?", 
+                             (fields_to_update['pnl'], target_close_id, key_tag))
+                
+            else:
+                # === API 导入逻辑 (直接更新) ===
+                # 保护机制：API单不允许修改 symbol, side, pnl 等硬数据
+                safe_update = {k: v for k, v in fields_to_update.items() 
+                              if k not in ['symbol', 'side', 'pnl', 'amount', 'fee', 'cost']}
+                
+                if not safe_update:
+                    return True, "✅ 基础数据受保护未修改，无复盘数据更新。"
+                
+                set_clause = ", ".join([f"{col} = ?" for col in safe_update.keys()])
+                values = list(safe_update.values())
+                values.extend([trade_id, key_tag])
+                
+                sql = f"UPDATE trades SET {set_clause} WHERE id = ? AND api_key_tag = ?"
+                c.execute(sql, values)
+            
+            conn.commit()
+            return True, "✅ 深度复盘数据已保存！"
+            
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return False, f"❌ 更新失败: {str(e)}"
+        finally:
+            conn.close()

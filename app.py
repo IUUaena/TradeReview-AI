@@ -6,6 +6,17 @@ import plotly.express as px
 from data_engine import TradeDataEngine
 from data_processor import process_trades_to_rounds # 引入核心逻辑
 from word_exporter import WordExporter
+from ai_assistant import generate_batch_review, generate_batch_review_v3, audit_single_trade
+from datetime import datetime
+
+# ==============================================================================
+# 0. 常量定义 (v3.0 核心复盘维度)
+# ==============================================================================
+MENTAL_STATES = ["🧘 Calm (平静)", "😰 FOMO (错失恐惧)", "😡 Revenge (报复)", "😨 Fear (恐惧)", "😌 Confident (自信)", "😐 Bored (无聊)", "🤯 Tilt (上头)"]
+
+PROCESS_TAGS = ["✅ Good Process (知行合一)", "❌ Bad Process (乱做)", "🍀 Lucky (运气好)", "💀 Disaster (灾难)"]
+
+COMMON_MISTAKES = ["#EarlyExit (早退)", "#NoStop (无止损)", "#Chasing (追涨杀跌)", "#OverSize (重仓)", "#AgainstTrend (逆势)", "#Hesitation (犹豫)", "#Impatience (缺乏耐心)"]
 
 # ==============================================================================
 # 1. 全局配置与样式
@@ -131,7 +142,28 @@ with st.sidebar:
             
         st.divider()
         
-        # --- B. 数据同步 (折叠菜单) ---
+        # --- B. AI 配置 (v3.0 增强) ---
+        with st.expander("🧠 AI 导师 & 系统配置"):
+            ai_base_url = st.text_input("API Base URL", value=st.session_state.get('ai_base_url', "https://api.deepseek.com"), placeholder="https://api.deepseek.com")
+            ai_key = st.text_input("AI API Key", type="password", value=st.session_state.get('ai_key', ''), help="推荐 DeepSeek")
+            
+            st.markdown("---")
+            st.caption("📜 **System Manifesto (系统宪法)**")
+            st.caption("告诉 AI 你的交易规则，它将据此监督你。")
+            default_manifesto = st.session_state.get('system_manifesto', 
+                "1. 绝不扛单，亏损达到 2% 无条件止损。\n2. 只做日线级别的顺势交易。\n3. 连续亏损 2 笔强制停止交易一天。")
+            
+            system_manifesto = st.text_area("我的交易铁律", value=default_manifesto, height=150)
+            
+            if st.button("💾 保存配置"):
+                st.session_state['ai_base_url'] = ai_base_url
+                st.session_state['ai_key'] = ai_key
+                st.session_state['system_manifesto'] = system_manifesto
+                st.success("配置已保存！AI 已熟读你的宪法。")
+        
+        st.divider()
+        
+        # --- C. 数据同步 (折叠菜单) ---
         with st.expander("🔄 数据同步"):
             mode = st.radio("模式", ["快速 (7天)", "深度 (1年)"], captions=["日常更新", "补录历史"])
             coins = ""
@@ -701,12 +733,17 @@ if selected_key:
             st.markdown("---")
             
             # ======================================================================
-            # 交易列表和复盘区域 (左列表，右详情)
+            # 交易列表和复盘区域 (使用 Tab 分隔)
             # ======================================================================
-            st.markdown("### 📋 交易列表 & 复盘")
+            # 使用 Tab 分隔功能区
+            tab_list, tab_report = st.tabs(["📋 交易复盘", "🔥 导师周报"])
             
-            # --- 布局：左 40% 列表，右 60% 详情 ---
-            col_list, col_detail = st.columns([4, 6])
+            # === Tab 1: 原有的交易列表与详情 ===
+            with tab_list:
+                st.markdown("### 📋 交易列表 & 复盘")
+                
+                # --- 布局：左 40% 列表，右 60% 详情 ---
+                col_list, col_detail = st.columns([4, 6])
             
             # === 左侧：交易列表 ===
             with col_list:
@@ -943,69 +980,219 @@ if selected_key:
                     
                     st.markdown("---")
                     
-                    # 2. 复盘工作台 (核心功能)
-                    st.markdown("### 📝 Trade Review (复盘工作台)")
+                    # ==================================================================
+                    # 2. 深度复盘工作台 (v3.0 Pro)
+                    # ==================================================================
+                    st.markdown("### 🧘 Deep Review (深度复盘)")
                     
                     # 从数据库重新读取最新数据 (确保实时性)
                     trade_row = raw_df[raw_df['id'] == trade['round_id']].iloc[0]
                     
-                    # 显示截图（如果有）
-                    screenshot_name = trade_row.get('screenshot', '')
-                    if pd.notna(screenshot_name) and screenshot_name:
-                        upload_dir = os.path.join(os.path.dirname(engine.db_path), 'uploads')
-                        screenshot_path = os.path.join(upload_dir, screenshot_name)
-                        if os.path.exists(screenshot_path):
-                            st.markdown("#### 📸 Chart Screenshot (图表截图)")
-                            st.image(screenshot_path, use_container_width=True)
-                            st.markdown("---")
+                    # 获取现有数据 (如果没有则设为默认值)
+                    curr_strategy = trade_row.get('strategy', '') or ""
+                    curr_note = trade_row.get('notes', '') or ""
+                    curr_mental = trade_row.get('mental_state', '') or MENTAL_STATES[0]
+                    curr_rr = trade_row.get('rr_ratio', None)
+                    if curr_rr is None or pd.isna(curr_rr):
+                        curr_rr = 0.0
+                    else:
+                        curr_rr = float(curr_rr)
+                    curr_rating = trade_row.get('setup_rating', None)
+                    if curr_rating is None or pd.isna(curr_rating):
+                        curr_rating = 5
+                    else:
+                        curr_rating = int(curr_rating)
+                    curr_process = trade_row.get('process_tag', '') or PROCESS_TAGS[0]
+                    curr_mistakes = trade_row.get('mistake_tags', '') or ""
+                    curr_mistakes_list = [tag.strip() for tag in curr_mistakes.split(',')] if curr_mistakes else []
                     
-                    current_note_db = trade_row.get('notes', '')
-                    current_strategy_db = trade_row.get('strategy', '')
-                    if pd.isna(current_note_db): current_note_db = ""
-                    if pd.isna(current_strategy_db): current_strategy_db = ""
-                    
-                    # 策略输入框
-                    st.markdown("**Strategy / Setup (策略/依据)**")
-                    st.caption("例如：趋势突破、EMA回调、支撑位反弹...")
-                    user_strategy = st.text_input("策略名称", value=current_strategy_db, placeholder="输入你的交易策略", label_visibility="collapsed")
-                    
+                    # --- 区域 A: 核心定性 (一行两列) ---
+                    with st.container():
+                        st.caption("先给这笔交易定性：是凭借实力，还是运气？心态炸了吗？")
+                        row1_col1, row1_col2 = st.columns(2)
+                        
+                        with row1_col1:
+                            # 心理状态
+                            try:
+                                mental_index = MENTAL_STATES.index(curr_mental) if curr_mental in MENTAL_STATES else 0
+                            except:
+                                mental_index = 0
+                            new_mental = st.selectbox(
+                                "🧠 Mental State (心理状态)", 
+                                options=MENTAL_STATES,
+                                index=mental_index,
+                                help="诚实面对自己，当时下单的那一刻，你在想什么？"
+                            )
+                            # 过程质量
+                            try:
+                                process_index = PROCESS_TAGS.index(curr_process) if curr_process in PROCESS_TAGS else 0
+                            except:
+                                process_index = 0
+                            new_process = st.selectbox(
+                                "⚖️ Process Quality (执行质量)",
+                                options=PROCESS_TAGS,
+                                index=process_index,
+                                help="抛开盈亏，你的执行符合系统吗？"
+                            )
+                            
+                        with row1_col2:
+                            # 形态评分 (滑块)
+                            new_rating = st.slider(
+                                "⭐ Setup Rating (机会评分)", 
+                                min_value=1, max_value=10, value=curr_rating,
+                                help="1分是垃圾行情强行做，10分是完美的教科书式机会"
+                            )
+                            # 预期盈亏比
+                            new_rr = st.number_input(
+                                "🎯 Expected R:R (计划盈亏比)",
+                                min_value=0.0, step=0.1, value=curr_rr,
+                                help="下单时你计划赚赔比是多少？"
+                            )
                     st.markdown("<br>", unsafe_allow_html=True)
+                    # --- 区域 B: 策略与细节 ---
+                    col_strat, col_tags = st.columns([1, 1])
                     
-                    # 详细笔记输入框
-                    st.markdown("**Detailed Notes (详细分析 & 心理状态)**")
-                    st.caption("记录入场理由、止损执行情况、以及当时的情绪...")
-                    user_note = st.text_area("复盘笔记", value=current_note_db, height=250, 
-                                            placeholder="记录你的心理状态、入场理由、离场反思...", label_visibility="collapsed")
-                    
-                    # 保存按钮区域
-                    col_save1, col_save2, col_save3 = st.columns([1, 2, 1])
-                    with col_save2:
+                    with col_strat:
+                        # 策略 (这里未来可以做成从配置读取的下拉菜单，目前先用文本框+自动补全)
+                        # 我们提供一些常见的策略作为 suggestions
+                        STRATEGY_SUGGESTIONS = ["趋势突破", "区间震荡", "EMA回调", "斐波那契回撤", "超跌反弹", "新闻事件"]
+                        strategy_options = list(set([curr_strategy] + STRATEGY_SUGGESTIONS)) if curr_strategy else STRATEGY_SUGGESTIONS
+                        # 确保 curr_strategy 在列表中
+                        if curr_strategy and curr_strategy not in strategy_options:
+                            strategy_options.insert(0, curr_strategy)
+                        new_strategy = st.selectbox(
+                            "📉 Strategy (策略依据)",
+                            options=strategy_options,
+                            index=0,
+                            help="这笔交易属于你系统里的哪一招？"
+                        )
+                    with col_tags:
+                        # 错误标签 (多选)
+                        new_mistakes = st.multiselect(
+                            "❌ Mistakes (犯错检讨)",
+                            options=COMMON_MISTAKES,
+                            default=[tag for tag in curr_mistakes_list if tag in COMMON_MISTAKES],
+                            help="如果没犯错留空即可"
+                        )
+                    # --- 区域 C: 深度笔记与截图 ---
+                    st.markdown("**📝 Detailed Notes (交易日记)**")
+                    new_note = st.text_area(
+                        "label", 
+                        value=curr_note, 
+                        height=150, 
+                        placeholder="在此记录你的心路历程：\n1. 为什么在这个位置入场？\n2. 止损是怎么设的？\n3. 持仓时有没有动摇？",
+                        label_visibility="collapsed"
+                    )
+                    # 截图展示与上传 (放在折叠区域，节省空间)
+                    screenshot_name = trade_row.get('screenshot', '')
+                    with st.expander("📸 图表截图 (点击展开)", expanded=False):
+                        if pd.notna(screenshot_name) and screenshot_name:
+                            upload_dir = os.path.join(os.path.dirname(engine.db_path), 'uploads')
+                            screenshot_path = os.path.join(upload_dir, screenshot_name)
+                            if os.path.exists(screenshot_path):
+                                st.image(screenshot_path, use_container_width=True)
+                            else:
+                                st.warning("⚠️ 截图文件丢失")
+                        
+                        # 允许重新上传
+                        new_screenshot = st.file_uploader("更新截图", type=['png', 'jpg', 'jpeg'])
+                    # --- 保存按钮 ---
+                    save_col1, save_col2 = st.columns([3, 1])
+                    with save_col2:
                         if st.button("💾 保存复盘", use_container_width=True, type="primary"):
-                            # 调用后端保存（同时保存策略和笔记）
-                            success = engine.update_trade_note(trade['round_id'], user_note, user_strategy, selected_key)
+                            # 1. 准备数据包
+                            update_data = {
+                                'mental_state': new_mental,
+                                'process_tag': new_process,
+                                'setup_rating': new_rating,
+                                'rr_ratio': new_rr,
+                                'strategy': new_strategy,
+                                'mistake_tags': ",".join(new_mistakes),
+                                'notes': new_note
+                            }
+                            
+                            # 2. 如果有新图，先保存图
+                            if new_screenshot:
+                                # 提取基础ID
+                                base_id = trade['round_id'].replace('_OPEN', '').replace('_CLOSE', '')
+                                fname = engine.save_screenshot(new_screenshot, base_id)
+                                if fname:
+                                    update_data['screenshot'] = fname
+                            
+                            # 3. 调用 v3.0 增强更新接口
+                            # 提取基础ID
+                            base_id = trade['round_id'].replace('_OPEN', '').replace('_CLOSE', '')
+                            success, msg = engine.update_trade_extended(base_id, selected_key, update_data)
+                            
                             if success:
-                                st.success("✅ 复盘已保存！")
+                                st.success(msg)
                                 time.sleep(0.5)
                                 st.rerun()
                             else:
-                                st.error("❌ 保存失败，请重试")
-
-                    # 3. AI 导师区域
+                                st.error(msg)
+                    # ==================================================================
+                    # 3. AI 审计员 (The Auditor)
+                    # ==================================================================
                     st.divider()
-                    st.markdown("### 🤖 导师点评 (AI Mentor)")
+                    st.markdown("### 🤖 AI Auditor (交易审计)")
                     
-                    ai_res = raw_df[raw_df['id'] == trade['round_id']].iloc[0].get('ai_analysis', '')
+                    ai_res = trade_row.get('ai_analysis', '')
                     
                     if ai_res:
-                        st.markdown(f"""
-                        <div style='background-color: {COLORS['card_bg']}; padding: 15px; border-left: 3px solid {COLORS['up']}; border-radius: 5px;'>
-                            {ai_res}
-                        </div>
-                        """, unsafe_allow_html=True)
+                        st.info(ai_res)
                     else:
-                        st.info("👈 暂无点评。请在后续版本配置 AI Key。")
-                        # 预留按钮
-                        st.button("🧠 请求 AI 分析 (即将上线)", disabled=True)
+                        st.caption("保存复盘笔记后，可请求 AI 进行单笔审计。")
+                        
+                    # 单笔审计按钮 (v3.0 正式版)
+                    if st.button("🔍 请求 AI 审计这笔交易", use_container_width=True):
+                        if 'ai_key' not in st.session_state or not st.session_state.get('ai_key'):
+                            st.error("请先在左侧配置 AI Key")
+                        else:
+                            with st.spinner("👮 审计师正在核对你的系统宪法..."):
+                                from ai_assistant import audit_single_trade
+                                
+                                # 准备数据字典
+                                trade_data_dict = trade_row.to_dict()
+                                # 确保包含 v3.0 字段 (如果 row 里没有，手动补上当前界面的值)
+                                trade_data_dict['mental_state'] = new_mental
+                                trade_data_dict['process_tag'] = new_process
+                                trade_data_dict['setup_rating'] = new_rating
+                                trade_data_dict['rr_ratio'] = new_rr
+                                trade_data_dict['mistake_tags'] = ",".join(new_mistakes)
+                                trade_data_dict['strategy'] = new_strategy
+                                trade_data_dict['notes'] = new_note
+                                # 添加必要的时间字段
+                                if 'open_date_str' not in trade_data_dict:
+                                    trade_data_dict['open_date_str'] = trade.get('open_date_str', '')
+                                if 'close_date_str' not in trade_data_dict:
+                                    trade_data_dict['close_date_str'] = trade.get('close_date_str', '')
+                                if 'duration_str' not in trade_data_dict:
+                                    trade_data_dict['duration_str'] = trade.get('duration_str', '')
+                                if 'net_pnl' not in trade_data_dict:
+                                    trade_data_dict['net_pnl'] = trade.get('net_pnl', 0)
+                                if 'symbol' not in trade_data_dict:
+                                    trade_data_dict['symbol'] = trade.get('symbol', '')
+                                if 'direction' not in trade_data_dict:
+                                    trade_data_dict['direction'] = trade.get('direction', '')
+                                
+                                # 调用 AI
+                                audit_result = audit_single_trade(
+                                    st.session_state['ai_key'],
+                                    st.session_state.get('ai_base_url', 'https://api.deepseek.com'),
+                                    trade_data_dict,
+                                    st.session_state.get('system_manifesto', '')
+                                )
+                                
+                                # 保存结果到数据库
+                                if "失败" not in audit_result:
+                                    # 提取基础ID
+                                    base_id = trade['round_id'].replace('_OPEN', '').replace('_CLOSE', '')
+                                    engine.update_ai_analysis(base_id, audit_result, selected_key)
+                                    st.success("审计完成！结果已存档。")
+                                    time.sleep(1)
+                                    st.rerun()
+                                else:
+                                    st.error(audit_result)
 
                 else:
                     # 空状态引导
@@ -1015,6 +1202,103 @@ if selected_key:
                         <p>点击列表中的一行，开始深度复盘</p>
                     </div>
                     """, unsafe_allow_html=True)
+            
+            # === Tab 2: 新增的 AI 批量分析 ===
+            with tab_report:
+                st.subheader("🔥 交易行为深度诊断")
+                st.caption('AI 导师将分析你最近的交易记录，寻找那些你自己都没发现的"亏损模式"。')
+                
+                col_r1, col_r2 = st.columns([1, 3])
+                
+                with col_r1:
+                    report_mode = st.selectbox("分析范围", ["最近 30 笔交易", "本周交易", "本月交易"])
+                    
+                    if st.button("🚀 生成诊断报告", type="primary", use_container_width=True):
+                        # 检查 AI 配置
+                        if 'ai_key' not in st.session_state or not st.session_state.get('ai_key'):
+                            st.error("请先在左侧侧边栏配置 AI API Key！")
+                        else:
+                            with st.spinner("AI 导师正在逐笔审查你的操作，请做好心理准备..."):
+                                # 1. 筛选数据
+                                target_df = rounds_df.copy()  # 使用处理好的 Round Trips
+                                if report_mode == "最近 30 笔交易":
+                                    target_df = target_df.head(30)
+                                elif report_mode == "本周交易":
+                                    # 筛选本周交易（简化处理，按最近7天）
+                                    from datetime import timedelta
+                                    now = datetime.now()
+                                    week_ago = now - timedelta(days=7)
+                                    # 这里需要根据实际数据的时间字段调整
+                                    target_df = target_df.head(50)  # 临时方案
+                                elif report_mode == "本月交易":
+                                    target_df = target_df.head(100)  # 临时方案
+                                
+                                # 2. 调用 AI (v3.0)
+                                from ai_assistant import generate_batch_review_v3
+                                ai_key = st.session_state.get('ai_key', '')
+                                ai_base_url = st.session_state.get('ai_base_url', 'https://api.deepseek.com')
+                                
+                                report_content = generate_batch_review_v3(
+                                    ai_key, 
+                                    ai_base_url, 
+                                    target_df,
+                                    st.session_state.get('system_manifesto', ''),  # 传入宪法
+                                    report_mode
+                                )
+                                
+                                # 3. 保存报告
+                                if "失败" not in report_content and "数据不足" not in report_content:
+                                    # 计算统计数据
+                                    t_count = len(target_df)
+                                    t_pnl = target_df['net_pnl'].sum() if not target_df.empty else 0
+                                    t_win_count = len(target_df[target_df['net_pnl'] > 0]) if not target_df.empty else 0
+                                    t_win = (t_win_count / t_count * 100) if t_count > 0 else 0
+                                    
+                                    start_date = str(target_df.iloc[-1]['close_date_str']) if not target_df.empty else ""
+                                    end_date = str(target_df.iloc[0]['close_date_str']) if not target_df.empty else ""
+                                    
+                                    engine.save_ai_report(
+                                        report_mode, 
+                                        start_date,
+                                        end_date,
+                                        t_count, t_pnl, t_win, report_content, selected_key
+                                    )
+                                    st.success("诊断完成！报告已归档。")
+                                    time.sleep(1)
+                                    st.rerun()
+                                else:
+                                    st.error(report_content)
+                    
+                    st.markdown("---")
+                    st.markdown("**📜 历史报告档案**")
+                    # 加载历史报告
+                    if selected_key:
+                        history_reports = engine.get_ai_reports(selected_key)
+                        if not history_reports.empty:
+                            for _, r in history_reports.iterrows():
+                                # 格式化时间戳
+                                r_date = datetime.fromtimestamp(r['created_at']/1000).strftime('%m-%d %H:%M')
+                                if st.button(f"📄 {r_date} ({r['report_type']})", key=f"hist_{r['id']}", use_container_width=True):
+                                    st.session_state['current_report'] = r['ai_feedback']
+                        else:
+                            st.caption("暂无历史报告")
+                    else:
+                        st.caption("请先选择账户")
+                
+                with col_r2:
+                    # 显示报告内容
+                    if 'current_report' in st.session_state:
+                        st.markdown(st.session_state['current_report'])
+                    else:
+                        # 显示最新的一份报告
+                        if selected_key:
+                            history_reports = engine.get_ai_reports(selected_key)
+                            if not history_reports.empty:
+                                st.markdown(history_reports.iloc[0]['ai_feedback'])
+                            else:
+                                st.info("👈 请点击左侧按钮生成你的第一份诊断报告。")
+                        else:
+                            st.info("👈 请先选择账户并配置 AI API Key。")
 else:
     # 登录引导页
     st.markdown("""
