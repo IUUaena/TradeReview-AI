@@ -13,9 +13,31 @@ if sys.platform == 'win32':
 basedir = os.path.abspath(os.path.dirname(__file__))
 db_path = os.path.join(basedir, 'trade_review.db')
 
+# 如果数据库不存在，先创建一个基础数据库（至少要有 trades 表）
 if not os.path.exists(db_path):
-    print(f"❌ 未找到数据库: {db_path}")
-    exit()
+    print(f"⚠️ 数据库不存在，正在创建: {db_path}")
+    # 先连接创建数据库文件，然后创建基础表结构
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    # 创建基础 trades 表（只包含必要的字段，升级脚本会添加其他字段）
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS trades (
+            id TEXT PRIMARY KEY,
+            timestamp INTEGER,
+            datetime TEXT,
+            symbol TEXT,
+            side TEXT,
+            amount REAL,
+            price REAL,
+            cost REAL,
+            fee REAL,
+            pnl REAL,
+            api_key_tag TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
+    print(f"✅ 数据库创建成功")
 
 print(f"📂 正在升级数据库 v4.0 (价格行为字段): {db_path}")
 

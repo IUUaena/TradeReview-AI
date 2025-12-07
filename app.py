@@ -1266,7 +1266,11 @@ if selected_key:
                             with st.spinner("正在从交易所拉取历史 K 线并存档..."):
                                 # 1. 估算入场价 (用原始记录的 price)
                                 entry_price = float(trade_row['price'])
-                                # 估算平仓价 (用 PnL 反推太复杂，暂用 K 线收盘价替代)
+                                
+                                # === 🛡️ 防御性检查：防止手动录入的交易价格为0导致除零错误 ===
+                                if entry_price <= 0:
+                                    st.error("❌ 无法计算：入场价为 0 (可能是手动录入且未填写价格)。请先编辑交易补充价格。")
+                                    st.stop()  # 停止执行
                                 
                                 candles, msg = engine.get_candles_for_trade(
                                     selected_key, selected_secret, 
@@ -1274,6 +1278,9 @@ if selected_key:
                                 )
                                 
                                 if candles is not None:
+                                    # 🛠️ 调试信息：确认 K 线抓到了
+                                    # st.info(f"成功抓取 {len(candles)} 根 K线") 
+                                    
                                     exit_price = candles.iloc[-1]['close']  # 简化处理
                                     from data_processor import calc_price_action_stats
                                     stats = calc_price_action_stats(
@@ -1289,14 +1296,22 @@ if selected_key:
                                             'etd': float(stats['ETD'])
                                         }
                                         base_id = trade['round_id'].replace('_OPEN', '').replace('_CLOSE', '')
-                                        engine.update_trade_extended(base_id, selected_key, save_data)
                                         
-                                        # 刷新页面以显示存好的数据
-                                        st.session_state[f"show_pa_{trade['round_id']}"] = False 
-                                        st.rerun()
+                                        # === 🔴 修复点：捕获保存结果，不要盲目刷新 ===
+                                        success, save_msg = engine.update_trade_extended(base_id, selected_key, save_data)
+                                        
+                                        if success:
+                                            st.success("✅ 计算并保存成功！页面即将刷新...")
+                                            st.session_state[f"show_pa_{trade['round_id']}"] = False 
+                                            time.sleep(1.5)  # 暂停一下让你看到成功提示
+                                            st.rerun()
+                                        else:
+                                            # 💥 如果保存失败，显示红字错误，且不刷新页面
+                                            st.error(f"❌ 保存失败: {save_msg}")
+                                            st.warning("可能原因：数据库缺少 mae/mfe 字段。请务必运行 update_db_v4.py！")
                                     
                                     else:
-                                        st.error("❌ 计算失败：stats 为 None")
+                                        st.error("❌ 计算失败：K线数据可能被过滤为空。请检查 data_processor.py 的过滤逻辑。")
                                 else:
                                     st.error(f"❌ K线获取失败: {msg}")
                         
