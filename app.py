@@ -1,5 +1,6 @@
 import streamlit as st
 import pandas as pd
+import numpy as np  # v5.0 新增：用于蒙特卡洛模拟
 import time
 import os
 import plotly.express as px
@@ -7,6 +8,7 @@ from data_engine import TradeDataEngine
 from data_processor import process_trades_to_rounds # 引入核心逻辑
 from word_exporter import WordExporter
 from ai_assistant import generate_batch_review, generate_batch_review_v3, audit_single_trade, review_potential_trade
+from risk_simulator import MonteCarloEngine  # v5.0 新增
 from datetime import datetime
 
 # ==============================================================================
@@ -898,7 +900,7 @@ if selected_key:
             # 交易列表和复盘区域 (使用 Tab 分隔)
             # ======================================================================
             # 使用 Tab 分隔功能区
-            tab_list, tab_analysis, tab_report, tab_strategy = st.tabs(["📋 交易复盘", "📊 归因分析", "🔥 导师周报", "📚 策略库"])
+            tab_list, tab_analysis, tab_report, tab_strategy, tab_risk = st.tabs(["📋 交易复盘", "📊 归因分析", "🔥 导师周报", "📚 策略库", "🎲 风险模拟"])
             
             # === Tab 1: 原有的交易列表与详情 ===
             with tab_list:
@@ -1402,132 +1404,173 @@ if selected_key:
                     </div>
                     """, unsafe_allow_html=True)
             
-            # === Tab 2: 归因分析 (v3.2 新增) ===
+            # === Tab 2: 归因分析 (v4.0 交互式复盘) ===
             with tab_analysis:
-                st.subheader("📊 交易归因分析 (Mirror of Truth)")
-                st.caption("用数据回答：是什么在赚钱？是什么在亏钱？")
+                st.subheader("📊 交易归因分析 (Interactive Dashboard)")
+                st.caption("💡 Tip: 点击下方的图表（柱子或饼图区域），可以直接筛选出对应的交易记录！")
                 
                 if rounds_df.empty:
                     st.info("暂无数据，请先录入交易。")
                 else:
-                    # 准备数据：确保 v3.0 字段存在，如果不存在填默认值
+                    # 1. 数据准备
                     analysis_df = rounds_df.copy()
                     
-                    # 辅助函数：从原始 raw_df 获取 v3.0 字段 (因为 process_trades_to_rounds 可能还没包含这些新字段)
-                    # 我们需要临时去 raw_df 查一下补充进来
+                    # 辅助函数：补全 v3.0 字段
                     def get_meta_field(round_id, field_name, default_val):
-                        # 处理手动录入的交易 ID（可能带有 _OPEN 或 _CLOSE 后缀）
-                        base_id = str(round_id).replace('_OPEN', '').replace('_CLOSE', '')
-                        
-                        # 先尝试直接用 round_id 查找
                         rows = raw_df[raw_df['id'] == round_id]
-                        if rows.empty:
-                            # 如果没找到，尝试用 base_id 查找（手动录入的情况）
-                            rows = raw_df[raw_df['id'] == base_id]
-                        
                         if not rows.empty:
                             val = rows.iloc[0].get(field_name)
-                            # 处理不同类型
-                            if field_name == 'setup_rating':
-                                try:
-                                    return int(val) if pd.notna(val) and val != "" and val != 0 else default_val
-                                except:
-                                    return default_val
                             return val if pd.notna(val) and val != "" else default_val
                         return default_val
                     
-                    # 批量补充字段到 analysis_df
-                    analysis_df['mental_state'] = analysis_df['round_id'].apply(lambda x: get_meta_field(x, 'mental_state', 'Unknown'))
-                    analysis_df['strategy'] = analysis_df['round_id'].apply(lambda x: get_meta_field(x, 'strategy', 'Undefined'))
-                    analysis_df['process_tag'] = analysis_df['round_id'].apply(lambda x: get_meta_field(x, 'process_tag', 'Unknown'))
-                    analysis_df['setup_rating'] = analysis_df['round_id'].apply(lambda x: get_meta_field(x, 'setup_rating', 0))
+                    # 批量补全
+                    for col, default in [('mental_state', 'Unknown'), ('strategy', 'Undefined'), 
+                                         ('process_tag', 'Unknown'), ('setup_rating', 0)]:
+                        analysis_df[col] = analysis_df['round_id'].apply(lambda x: get_meta_field(x, col, default))
                     
-                    st.markdown("---")
-                    # --- 第一行：心态与执行 (饼图/柱状图) ---
-                    col_a1, col_a2 = st.columns(2)
+                    # 将时间转换为 datetime 对象以便绘图
+                    analysis_df['date_dt'] = pd.to_datetime(analysis_df['close_date_str'])
+                    analysis_df['date_day'] = analysis_df['date_dt'].dt.date
                     
-                    with col_a1:
-                        st.markdown("**🧠 心态盈亏分布 (PnL by Mental State)**")
-                        # 按心态分组统计总盈亏
-                        mental_pnl = analysis_df.groupby('mental_state')['net_pnl'].sum().reset_index()
-                        
-                        fig_mental = px.bar(
-                            mental_pnl, x='mental_state', y='net_pnl',
-                            color='net_pnl',
-                            color_continuous_scale=['#FF5252', '#4CAF50'],
-                            labels={'net_pnl': '净盈亏($)', 'mental_state': '心理状态'}
-                        )
-                        fig_mental.update_layout(plot_bgcolor='#1E1E1E', paper_bgcolor='#1E1E1E', font=dict(color='#E0E0E0'))
-                        st.plotly_chart(fig_mental, use_container_width=True)
-                        
-                    with col_a2:
-                        st.markdown("**⚖️ 知行合一率 (Process Quality)**")
-                        # 统计各执行质量的单数
-                        process_counts = analysis_df['process_tag'].value_counts().reset_index()
-                        process_counts.columns = ['process_tag', 'count']
-                        
-                        fig_process = px.pie(
-                            process_counts, values='count', names='process_tag',
-                            hole=0.4,
-                            color='process_tag',
-                            color_discrete_map={
-                                "✅ Good Process (知行合一)": "#4CAF50",
-                                "❌ Bad Process (乱做)": "#FF5252",
-                                "🍀 Lucky (运气好)": "#FFC107",
-                                "💀 Disaster (灾难)": "#9C27B0"
-                            }
-                        )
-                        fig_process.update_layout(plot_bgcolor='#1E1E1E', paper_bgcolor='#1E1E1E', font=dict(color='#E0E0E0'))
-                        st.plotly_chart(fig_process, use_container_width=True)
+                    # ==========================================================
+                    # A. 交易日历热力图 (Calendar Heatmap)
+                    # ==========================================================
+                    st.markdown("### 📅 交易频率热力图 (Trading Heatmap)")
                     
-                    st.markdown("---")
-                    # --- 第二行：策略效能 (横向柱状图) ---
-                    st.markdown("**📉 策略效能排行榜 (PnL by Strategy)**")
-                    
-                    strat_stats = analysis_df.groupby('strategy').agg(
-                        total_pnl=('net_pnl', 'sum'),
-                        trade_count=('round_id', 'count'),
-                        win_rate=('net_pnl', lambda x: (x > 0).sum() / len(x) * 100)
+                    # 统计每天的交易次数和盈亏
+                    daily_stats = analysis_df.groupby('date_day').agg(
+                        count=('round_id', 'count'),
+                        pnl=('net_pnl', 'sum')
                     ).reset_index()
                     
-                    # 过滤掉未定义的
-                    strat_stats = strat_stats[strat_stats['strategy'] != 'Undefined']
+                    # 补全日期范围（为了画出完整的日历网格）
+                    if not daily_stats.empty:
+                        idx = pd.date_range(daily_stats['date_day'].min(), daily_stats['date_day'].max())
+                        daily_stats = daily_stats.set_index('date_day').reindex(idx).fillna(0).reset_index()
+                        daily_stats.columns = ['date', 'count', 'pnl']
                     
-                    if not strat_stats.empty:
-                        fig_strat = px.bar(
-                            strat_stats.sort_values(by='total_pnl', ascending=True), 
-                            x='total_pnl', y='strategy',
-                            orientation='h',
-                            text='trade_count',
-                            color='total_pnl',
-                            color_continuous_scale=['#FF5252', '#4CAF50'],
-                            labels={'total_pnl': '总盈亏($)', 'strategy': '策略名称', 'trade_count': '交易次数'}
-                        )
-                        fig_strat.update_traces(texttemplate='%{text}笔', textposition='outside')
-                        fig_strat.update_layout(plot_bgcolor='#1E1E1E', paper_bgcolor='#1E1E1E', font=dict(color='#E0E0E0'))
-                        st.plotly_chart(fig_strat, use_container_width=True)
-                    else:
-                        st.caption("暂无策略数据，请在复盘时选择策略。")
+                    # 使用 Plotly 绘制热力图
+                    # 颜色映射：亏损(红) -> 0(灰) -> 盈利(绿)
+                    # 为了更直观，我们可以用 count 做热度，hover 显示 PnL
+                    import plotly.graph_objects as go
                     
+                    fig_cal = px.bar(
+                        daily_stats, x='date', y='count',
+                        color='pnl',
+                        color_continuous_scale=['#FF5252', '#2C2C2C', '#4CAF50'],
+                        color_continuous_midpoint=0,
+                        labels={'count': '交易笔数', 'date': '日期', 'pnl': '当日盈亏'},
+                        title="每日交易活跃度与盈亏 (颜色=盈亏, 高度=笔数)"
+                    )
+                    fig_cal.update_layout(
+                        plot_bgcolor='#1E1E1E', paper_bgcolor='#1E1E1E', 
+                        font=dict(color='#E0E0E0'),
+                        xaxis_title="", yaxis_title="交易笔数",
+                        hovermode="x unified"
+                    )
+                    
+                    # 启用交互：点击柱子筛选那天的数据
+                    selected_date_event = st.plotly_chart(fig_cal, use_container_width=True, on_select="rerun", selection_mode="points")
                     st.markdown("---")
-                    # --- 第三行：评分与盈亏的相关性 (散点图) ---
-                    st.markdown("**⭐ 机会评分 vs 实际盈亏 (Rating Correlation)**")
-                    st.caption("验证你的眼光：高分的机会真的赚得更多吗？")
                     
-                    # 过滤掉0分的
-                    rating_df = analysis_df[analysis_df['setup_rating'] > 0]
+                    # ==========================================================
+                    # B. 交互式归因图表 (Interactive Charts)
+                    # ==========================================================
                     
-                    if not rating_df.empty:
-                        fig_rating = px.box(
-                            rating_df, x='setup_rating', y='net_pnl',
-                            color='setup_rating',
-                            points="all", # 显示所有点
-                            labels={'setup_rating': '机会评分 (1-10)', 'net_pnl': '单笔盈亏($)'}
+                    # 初始化筛选掩码 (默认全选)
+                    mask = pd.Series([True] * len(analysis_df))
+                    filter_reason = "全部数据"
+                    
+                    # 处理日历筛选
+                    if selected_date_event and len(selected_date_event.selection["points"]) > 0:
+                        point = selected_date_event.selection["points"][0]
+                        # Plotly 返回的 x 通常是日期字符串
+                        if "x" in point:
+                            clicked_date = point["x"]  # '2023-10-05'
+                            mask = analysis_df['date_day'].astype(str) == clicked_date
+                            filter_reason = f"📅 日期: {clicked_date}"
+                    
+                    # 布局：心态 & 策略
+                    col_chart1, col_chart2 = st.columns(2)
+                    
+                    with col_chart1:
+                        st.markdown("**🧠 心态盈亏 (点击筛选)**")
+                        mental_pnl = analysis_df.groupby('mental_state')['net_pnl'].sum().reset_index()
+                        fig_mental = px.bar(
+                            mental_pnl, x='mental_state', y='net_pnl',
+                            color='net_pnl', color_continuous_scale=['#FF5252', '#4CAF50'],
                         )
-                        fig_rating.update_layout(plot_bgcolor='#1E1E1E', paper_bgcolor='#1E1E1E', font=dict(color='#E0E0E0'))
-                        st.plotly_chart(fig_rating, use_container_width=True)
+                        fig_mental.update_layout(clickmode='event+select', plot_bgcolor='#1E1E1E', paper_bgcolor='#1E1E1E', font=dict(color='#E0E0E0'))
+                        # 交互
+                        sel_mental = st.plotly_chart(fig_mental, use_container_width=True, on_select="rerun", key="chart_mental")
+                        
+                        if sel_mental and len(sel_mental.selection["points"]) > 0:
+                            clicked_mental = sel_mental.selection["points"][0]["x"]
+                            mask = analysis_df['mental_state'] == clicked_mental
+                            filter_reason = f"🧠 心态: {clicked_mental}"
+                    
+                    with col_chart2:
+                        st.markdown("**📉 策略效能 (点击筛选)**")
+                        strat_stats = analysis_df.groupby('strategy')['net_pnl'].sum().reset_index().sort_values('net_pnl')
+                        fig_strat = px.bar(
+                            strat_stats, x='net_pnl', y='strategy', orientation='h',
+                            color='net_pnl', color_continuous_scale=['#FF5252', '#4CAF50']
+                        )
+                        fig_strat.update_layout(clickmode='event+select', plot_bgcolor='#1E1E1E', paper_bgcolor='#1E1E1E', font=dict(color='#E0E0E0'))
+                        # 交互
+                        sel_strat = st.plotly_chart(fig_strat, use_container_width=True, on_select="rerun", key="chart_strat")
+                        
+                        if sel_strat and len(sel_strat.selection["points"]) > 0:
+                            clicked_strat = sel_strat.selection["points"][0]["y"]
+                            mask = analysis_df['strategy'] == clicked_strat
+                            filter_reason = f"📉 策略: {clicked_strat}"
+                    
+                    # ==========================================================
+                    # C. 联动交易列表 (Drill-down List)
+                    # ==========================================================
+                    
+                    # 应用筛选
+                    filtered_df = analysis_df[mask]
+                    
+                    st.divider()
+                    st.markdown(f"### 🔍 关联交易明细 ({filter_reason})")
+                    
+                    if filtered_df.empty:
+                        st.warning("该筛选条件下没有交易记录。")
                     else:
-                        st.caption("暂无评分数据。")
+                        st.caption(f"共找到 {len(filtered_df)} 笔交易，总盈亏: ${filtered_df['net_pnl'].sum():.2f}")
+                        
+                        # 显示精简表格
+                        st.dataframe(
+                            filtered_df[['close_date_str', 'symbol', 'direction', 'net_pnl', 'mental_state', 'strategy', 'process_tag']],
+                            use_container_width=True,
+                            hide_index=True,
+                            column_config={
+                                "net_pnl": st.column_config.NumberColumn("净盈亏", format="$%.2f"),
+                                "mental_state": "心态",
+                                "strategy": "策略",
+                                "process_tag": "执行"
+                            }
+                        )
+                        
+                        # 如果只有少量数据，直接显示详情卡片
+                        if len(filtered_df) <= 5:
+                            for _, row in filtered_df.iterrows():
+                                with st.expander(f"{row['symbol']} {row['direction']} (${row['net_pnl']}) - {row['close_date_str']}"):
+                                    c1, c2 = st.columns([2, 1])
+                                    with c1:
+                                        st.markdown(f"**笔记**: {row.get('notes', '无')}")
+                                        st.markdown(f"**AI审计**: {row.get('ai_analysis', '无')}")
+                                    with c2:
+                                        # 尝试显示图片
+                                        raw_row = raw_df[raw_df['id'] == row['round_id']]
+                                        if not raw_row.empty:
+                                            img_name = raw_row.iloc[0].get('screenshot')
+                                            if img_name:
+                                                upload_dir = os.path.join(os.path.dirname(engine.db_path), 'uploads')
+                                                img_path = os.path.join(upload_dir, img_name)
+                                                if os.path.exists(img_path):
+                                                    st.image(img_path)
             
             # === Tab 3: 新增的 AI 批量分析 ===
             with tab_report:
@@ -1701,6 +1744,148 @@ if selected_key:
                                 st.rerun()
                     else:
                         st.info("暂无策略，请在左侧创建第一个策略")
+            
+# === Tab 5: 蒙特卡洛模拟 (v5.1 交互增强版) ===
+            with tab_risk:
+                st.subheader("🎲 蒙特卡洛模拟 (Monte Carlo Simulation)")
+                st.caption("基于你的历史表现，模拟未来 1000 种可能的结局。")
+                
+                if len(rounds_df) < 10:
+                    st.warning(f"⚠️ 数据量不足：当前只有 {len(rounds_df)} 笔交易，至少需要 10 笔才能进行有效模拟。")
+                else:
+                    # --- 参数设置区域 (双向同步逻辑) ---
+                    
+                    # 1. 初始化 Session State (如果还没存过)
+                    if 'mc_sim_runs' not in st.session_state: st.session_state.mc_sim_runs = 100
+                    if 'mc_sim_trades' not in st.session_state: st.session_state.mc_sim_trades = 50
+
+                    # 2. 定义回调函数 (同步滑块和输入框)
+                    def sync_runs_slider(): st.session_state.mc_sim_runs = st.session_state.slider_runs
+                    def sync_runs_input(): st.session_state.mc_sim_runs = st.session_state.input_runs
+                    def sync_trades_slider(): st.session_state.mc_sim_trades = st.session_state.slider_trades
+                    def sync_trades_input(): st.session_state.mc_sim_trades = st.session_state.input_trades
+
+                    col_p1, col_p2, col_p3 = st.columns(3)
+                    
+                    with col_p1:
+                        sim_start_equity = st.number_input("初始模拟资金 ($)", value=10000.0, step=1000.0)
+                    
+                    with col_p2:
+                        st.markdown("**模拟次数 (平行宇宙)**")
+                        # 滑块 (Key: slider_runs)
+                        st.slider(
+                            "Runs Slider", 50, 1000, 
+                            value=st.session_state.mc_sim_runs, 
+                            key='slider_runs', on_change=sync_runs_slider, 
+                            label_visibility="collapsed"
+                        )
+                        # 输入框 (Key: input_runs)
+                        st.number_input(
+                            "Runs Input", 50, 1000, 
+                            value=st.session_state.mc_sim_runs, 
+                            key='input_runs', on_change=sync_runs_input, 
+                            label_visibility="collapsed"
+                        )
+
+                    with col_p3:
+                        st.markdown("**未来交易笔数**")
+                        # 滑块 (Key: slider_trades) - 上限改为 10000
+                        st.slider(
+                            "Trades Slider", 10, 10000, 
+                            value=st.session_state.mc_sim_trades, 
+                            key='slider_trades', on_change=sync_trades_slider,
+                            label_visibility="collapsed"
+                        )
+                        # 输入框 (Key: input_trades)
+                        st.number_input(
+                            "Trades Input", 10, 10000, 
+                            value=st.session_state.mc_sim_trades, 
+                            key='input_trades', on_change=sync_trades_input,
+                            label_visibility="collapsed"
+                        )
+                    
+                    # 使用 session_state 里的最新值进行模拟
+                    if st.button("🎰 开始模拟未来", use_container_width=True, type="primary"):
+                        mc_engine = MonteCarloEngine(rounds_df)
+                        
+                        # 获取同步后的值
+                        final_runs = st.session_state.mc_sim_runs
+                        final_trades = st.session_state.mc_sim_trades
+                        
+                        with st.spinner(f"正在模拟 {final_runs} 个平行宇宙，每个宇宙交易 {final_trades} 笔..."):
+                            res, msg = mc_engine.run_simulation(sim_start_equity, final_runs, final_trades)
+                            
+                        if res:
+                            # --- 1. 核心指标卡片 ---
+                            st.markdown("### 🔮 预言结果")
+                            m1, m2, m3, m4 = st.columns(4)
+                            
+                            m1.metric("🔥 破产概率 (Risk of Ruin)", f"{res['risk_of_ruin']:.1f}%", 
+                                      help="未来这几笔交易中，账户归零的概率")
+                            
+                            m2.metric("📉 预期最大回撤", f"{res['avg_max_dd']:.1f}%", 
+                                      help="平均情况下的最大资金回撤幅度")
+                            
+                            profit_exp = res['median_final'] - sim_start_equity
+                            m3.metric("💰 预期收益 (中位数)", f"${profit_exp:,.0f}", 
+                                      delta_color="normal" if profit_exp > 0 else "inverse")
+                            
+                            m4.metric("🤕 最坏情况 (95%置信)", f"${res['worst_case']:,.0f}", 
+                                      help="在最倒霉的5%的情况下，你的资金余额")
+
+                            # --- 2. 意大利面图 (Spaghetti Chart) ---
+                            st.markdown("---")
+                            st.markdown("**📈 资金曲线分布图**")
+                            
+                            # 准备 Plotly 数据
+                            # 为了性能，如果模拟次数太多，只画前 100 条线
+                            display_lines = 100 if final_runs > 100 else final_runs
+                            plot_lines = res['equity_curves'][:display_lines] 
+                            
+                            import plotly.graph_objects as go
+                            
+                            fig_mc = go.Figure()
+                            
+                            # A. 绘制模拟线 (细线，半透明)
+                            x_axis = list(range(1, res['trades_per_run'] + 1))
+                            for line in plot_lines:
+                                fig_mc.add_trace(go.Scatter(
+                                    x=x_axis, y=line,
+                                    mode='lines',
+                                    line=dict(color='rgba(100, 100, 100, 0.1)', width=1),
+                                    showlegend=False,
+                                    hoverinfo='skip'
+                                ))
+                            
+                            # B. 绘制平均线 (亮色，粗线)
+                            avg_line = np.mean(res['equity_curves'], axis=0)
+                            fig_mc.add_trace(go.Scatter(
+                                x=x_axis, y=avg_line,
+                                mode='lines',
+                                name='平均预期',
+                                line=dict(color='#2196F3', width=3)
+                            ))
+                            
+                            # C. 绘制起始资金线
+                            fig_mc.add_hline(y=sim_start_equity, line_dash="dash", line_color="white", annotation_text="本金线")
+                            
+                            fig_mc.update_layout(
+                                title=f"未来 {final_trades} 笔交易的资金演变 (展示前 {display_lines}/{final_runs} 条路径)",
+                                xaxis_title="交易笔数",
+                                yaxis_title="账户资金",
+                                plot_bgcolor='#1E1E1E', 
+                                paper_bgcolor='#1E1E1E', 
+                                font=dict(color='#E0E0E0'),
+                                height=500
+                            )
+                            
+                            st.plotly_chart(fig_mc, use_container_width=True)
+                            
+                            # --- 3. 导师点评 ---
+                            st.info(f"💡 **风控导师点评**：如果你的破产率 > 0%，请立即缩小仓位！目前最坏的情况下，你的账户会变成 ${res['worst_case']:,.0f}。")
+                            
+                        else:
+                            st.error(msg)
 else:
     # 登录引导页
     st.markdown("""
