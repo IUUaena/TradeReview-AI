@@ -7,7 +7,7 @@ import plotly.express as px
 from data_engine import TradeDataEngine
 from data_processor import process_trades_to_rounds # 引入核心逻辑
 from word_exporter import WordExporter
-from ai_assistant import generate_batch_review, generate_batch_review_v3, audit_single_trade, review_potential_trade
+from ai_assistant import generate_batch_review, generate_batch_review_v3, audit_single_trade, review_potential_trade, analyze_live_positions
 from risk_simulator import MonteCarloEngine  # v5.0 新增
 from datetime import datetime
 
@@ -399,6 +399,100 @@ if selected_key:
             st.warning("🤔 有数据，但没有检测到完整的【开仓-平仓】闭环。请确认是否有已平仓的订单。")
         else:
             # ======================================================================
+            # ==============================================================================
+            # 00. v6.0 实时战场 (Live Cockpit) - 放在最顶端
+            # ==============================================================================
+            with st.expander("📡 实时战场 (Live Positions & Risk)", expanded=False):
+                if not selected_key:
+                    st.info("👈 请先在左侧选择账户以查看实时持仓。")
+                else:
+                    col_live_btn, col_live_info = st.columns([1, 4])
+                    
+                    with col_live_btn:
+                        if st.button("🔄 刷新实时数据", use_container_width=True, type="primary"):
+                            st.session_state.need_live_refresh = True
+                    
+                    # 获取数据 (为了不拖慢页面，只在点击刷新或首次加载时获取)
+                    if 'live_data' not in st.session_state or st.session_state.get('need_live_refresh', False):
+                        with st.spinner("正在连接交易所获取最新行情..."):
+                            live_res, live_msg = engine.get_open_positions(selected_key, selected_secret)
+                            if live_res:
+                                st.session_state.live_data = live_res
+                                st.session_state.live_update_time = datetime.now().strftime("%H:%M:%S")
+                            else:
+                                st.error(live_msg)
+                            st.session_state.need_live_refresh = False
+                    
+                    # 显示数据
+                    if 'live_data' in st.session_state and st.session_state.live_data:
+                        data = st.session_state.live_data
+                        positions = data['positions']
+                        equity = data['equity']
+                        
+                        # A. 账户概览
+                        with col_live_info:
+                            st.caption(f"上次更新: {st.session_state.live_update_time}")
+                        
+                        l1, l2, l3 = st.columns(3)
+                        l1.metric("账户净值 (Equity)", f"${equity:,.2f}")
+                        
+                        total_unrealized = sum([p['pnl'] for p in positions])
+                        l2.metric("当前浮动盈亏", f"${total_unrealized:,.2f}", 
+                                  delta_color="normal" if total_unrealized >= 0 else "inverse")
+                        
+                        position_count = len(positions)
+                        l3.metric("持仓数量", f"{position_count} 个")
+                        
+                        st.markdown("---")
+                        
+                        # B. 持仓详情卡片
+                        if positions:
+                            for p in positions:
+                                # 颜色定义
+                                card_color = "rgba(76, 175, 80, 0.1)" if p['pnl'] >= 0 else "rgba(255, 82, 82, 0.1)"
+                                pnl_color = "green" if p['pnl'] >= 0 else "red"
+                                side_icon = "🟢" if "LONG" in p['side'] else "🔴"
+                                
+                                st.markdown(f"""
+                                <div style="background-color: {card_color}; padding: 15px; border-radius: 10px; margin-bottom: 10px; border: 1px solid #444;">
+                                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                                        <div>
+                                            <span style="font-size: 18px; font-weight: bold;">{side_icon} {p['symbol']}</span>
+                                            <span style="background: #333; padding: 2px 6px; border-radius: 4px; font-size: 12px; margin-left: 8px;">{p['side']} x{p['leverage']}</span>
+                                        </div>
+                                        <div style="text-align: right;">
+                                            <div style="font-size: 20px; font-weight: bold; color: {pnl_color};">${p['pnl']:.2f}</div>
+                                            <div style="font-size: 12px; color: #888;">{p['roi']:.2f}%</div>
+                                        </div>
+                                    </div>
+                                    <div style="margin-top: 8px; font-size: 13px; color: #ccc; display: flex; justify-content: space-between;">
+                                        <span>开仓: {p['entry_price']} ➝ 现价: {p['mark_price']}</span>
+                                        <span>强平: <span style="color: #FF5252;">{p['liquidation_price']}</span></span>
+                                    </div>
+                                </div>
+                                """, unsafe_allow_html=True)
+                            
+                            # C. AI 实时战术顾问
+                            st.markdown("##### 🧠 AI 战术顾问")
+                            if st.button("🆘 分析当前持仓风险", use_container_width=True):
+                                if 'ai_key' not in st.session_state or not st.session_state['ai_key']:
+                                    st.error("请配置 AI Key")
+                                else:
+                                    with st.spinner("AI 正在扫描你的风险敞口..."):
+                                        from ai_assistant import analyze_live_positions
+                                        advice = analyze_live_positions(
+                                            st.session_state['ai_key'],
+                                            st.session_state['ai_base_url'],
+                                            data,
+                                            st.session_state.get('system_manifesto', ''),
+                                            st.session_state.get('ai_model', 'deepseek-chat')
+                                        )
+                                        st.info(advice)
+                        else:
+                            st.success("✅ 当前空仓 (Flat)。好好休息，等待机会。")
+            
+            st.markdown("---")
+            
             # 0. v3.3 智能风控沙盘 (Pre-Trade Sandbox)
             # ======================================================================
             with st.expander("🛡️ 智能风控沙盘 (开仓计算器 + AI 拦截)", expanded=False):

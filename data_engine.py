@@ -172,83 +172,216 @@ class TradeDataEngine:
         except:
             return None
 
-    def fetch_and_save(self, api_key, secret, mode, target_coins_str=None, progress_callback=None):
+    # ===========================
+    #  📡 实时数据获取 (v6.0)
+    # ===========================
+    def get_open_positions(self, api_key, secret):
+        """
+        获取当前交易所的持仓信息 (仅限 U本位合约)
+        """
         exchange = self.get_exchange(api_key, secret)
-        if not exchange: return "❌ 交易所对象创建失败", 0
-        
-        try:
-            if progress_callback: progress_callback("📡 连接交易所获取合约名录...", 1)
-            markets = exchange.load_markets()
-            coin_map = {}
-            all_usdt_symbols = []
-            for s, m in markets.items():
-                if '/USDT' in s and m.get('contract'):
-                    all_usdt_symbols.append(s)
-                    base = m.get('base')
-                    if base: coin_map[base.upper()] = s
-            all_usdt_symbols = sorted(list(set(all_usdt_symbols)))
-            total_count = len(all_usdt_symbols)
-        except Exception as e:
-            return f"❌ 连接失败: {str(e)}", 0
-
-        key_tag = api_key.strip()[-4:]
-        all_trades = []
-
-        # --- 模式 A: 快速 ---
-        if mode == 'recent':
-            if progress_callback: progress_callback(f"🚀 准备扫描 {total_count} 个合约 (最近7天)...", 5)
-            since_time = int((datetime.now() - timedelta(days=7)).timestamp() * 1000)
-            for i, symbol in enumerate(all_usdt_symbols):
-                try:
-                    if i % 5 == 0 and progress_callback:
-                        pct = 5 + int((i / total_count) * 90)
-                        progress_callback(f"🔍 [{i}/{total_count}] 扫描: {symbol}", pct)
-                    trades = exchange.fetch_my_trades(symbol=symbol, since=since_time, limit=100)
-                    if trades: 
-                        all_trades.extend(trades)
-                        time.sleep(0.05) 
-                except: continue
-
-        # --- 模式 B: 深度 (最近1年倒序) ---
-        elif mode == 'deep':
-            if not target_coins_str: return "⚠️ 请输入币种", 0
-            user_inputs = [s.strip().upper() for s in target_coins_str.split(',') if s.strip()]
-            target_symbols = []
-            for u_coin in user_inputs:
-                if u_coin in coin_map: target_symbols.append(coin_map[u_coin])
-                else: target_symbols.append(f"{u_coin}/USDT")
+        if not exchange:
+            return None, "❌ 无法连接交易所"
             
-            if not target_symbols: return "❌ 无匹配合约", 0
-
-            now_ts = exchange.milliseconds()
-            stop_ts = int((datetime.now() - timedelta(days=365)).timestamp() * 1000)
-            window_size = 7 * 24 * 60 * 60 * 1000
-            total_targets = len(target_symbols)
-
-            for i, symbol in enumerate(target_symbols):
-                current_end = now_ts
-                while current_end > stop_ts:
-                    current_start = current_end - window_size
-                    if current_start < stop_ts: current_start = stop_ts 
+        try:
+            # 获取余额 (用于计算风险率)
+            balance_info = exchange.fetch_balance()
+            usdt_equity = balance_info['USDT']['total'] if 'USDT' in balance_info else 0.0
+            
+            # 获取持仓 (Binance 专属接口优化)
+            # fetch_positions 通常返回所有币种，我们需要过滤出有持仓的
+            positions = exchange.fetch_positions()
+            active_positions = []
+            
+            for p in positions:
+                # 过滤掉数量为 0 的空仓
+                if float(p['contracts']) > 0:
+                    # 统一数据格式
+                    entry_price = float(p['entryPrice'] or 0)
+                    current_price = float(p['markPrice'] or 0)
+                    amount = float(p['contracts'])
+                    side = p['side']  # 'long' or 'short'
+                    leverage = p.get('leverage', 1)
+                    unrealized_pnl = float(p['unrealizedPnl'] or 0)
                     
-                    msg = f"⛏️ [{i+1}/{total_targets}] {symbol}: 查区间 {datetime.fromtimestamp(current_start/1000).strftime('%Y-%m-%d')}..."
-                    if progress_callback: progress_callback(msg, 50)
+                    # 计算盈亏比率
+                    roi = (unrealized_pnl / (entry_price * amount / leverage)) * 100 if entry_price else 0
                     
+                    active_positions.append({
+                        'symbol': p['symbol'],
+                        'side': side.upper(),
+                        'amount': amount,
+                        'entry_price': entry_price,
+                        'mark_price': current_price,
+                        'leverage': leverage,
+                        'pnl': unrealized_pnl,
+                        'roi': roi,
+                        'liquidation_price': float(p.get('liquidationPrice') or 0)
+                    })
+            
+            return {
+                'equity': usdt_equity,
+                'positions': active_positions
+            }, "OK"
+            
+        except Exception as e:
+            return None, f"获取持仓失败: {str(e)}"
+
+    def fetch_and_save(self, api_key, secret, mode, target_coins_str=None, progress_callback=None):
+        try:
+            exchange = self.get_exchange(api_key, secret)
+            if not exchange: 
+                return "❌ 交易所对象创建失败", 0
+            
+            try:
+                if progress_callback: progress_callback("📡 连接交易所获取合约名录...", 1)
+                markets = exchange.load_markets()
+                coin_map = {}
+                all_usdt_symbols = []
+                for s, m in markets.items():
+                    if '/USDT' in s and m.get('contract'):
+                        all_usdt_symbols.append(s)
+                        base = m.get('base')
+                        if base: coin_map[base.upper()] = s
+                all_usdt_symbols = sorted(list(set(all_usdt_symbols)))
+                total_count = len(all_usdt_symbols)
+            except Exception as e:
+                return f"❌ 连接失败: {str(e)}", 0
+
+            key_tag = api_key.strip()[-4:]
+            all_trades = []
+
+            # --- 模式 A: 快速 ---
+            if mode == 'recent':
+                if progress_callback: progress_callback(f"🚀 准备扫描 {total_count} 个合约 (最近7天)...", 5)
+                since_time = int((datetime.now() - timedelta(days=7)).timestamp() * 1000)
+                for i, symbol in enumerate(all_usdt_symbols):
                     try:
-                        trades = exchange.fetch_my_trades(symbol=symbol, since=current_start, limit=1000, params={'endTime': current_end})
-                        if trades: all_trades.extend(trades)
-                        current_end = current_start
-                        if current_end <= stop_ts: break
-                        time.sleep(0.3)
-                    except:
-                        current_end = current_start 
-                        time.sleep(1)
+                        if i % 5 == 0 and progress_callback:
+                            pct = 5 + int((i / total_count) * 90)
+                            progress_callback(f"🔍 [{i}/{total_count}] 扫描: {symbol}", pct)
+                        trades = exchange.fetch_my_trades(symbol=symbol, since=since_time, limit=100)
+                        if trades: 
+                            all_trades.extend(trades)
+                            time.sleep(0.05) 
+                    except: continue
 
-        if not all_trades: return f"✅ 扫描完成。未发现新数据。", 0
-        if progress_callback: progress_callback(f"💾 保存 {len(all_trades)} 条记录...", 95)
-        new_count = self._save_to_db(all_trades, key_tag)
-        if progress_callback: progress_callback("✅ 完成！", 100)
-        return "成功", new_count
+            # --- 模式 B: 深度 (最近1年倒序) ---
+            elif mode == 'deep':
+                if not target_coins_str: 
+                    return "⚠️ 请输入币种", 0
+                user_inputs = [s.strip().upper() for s in target_coins_str.split(',') if s.strip()]
+                target_symbols = []
+                for u_coin in user_inputs:
+                    if u_coin in coin_map: target_symbols.append(coin_map[u_coin])
+                    else: target_symbols.append(f"{u_coin}/USDT")
+                
+                if not target_symbols: 
+                    return "❌ 无匹配合约", 0
+
+                now_ts = exchange.milliseconds()
+                stop_ts = int((datetime.now() - timedelta(days=365)).timestamp() * 1000)
+                window_size = 7 * 24 * 60 * 60 * 1000
+                total_targets = len(target_symbols)
+
+                for i, symbol in enumerate(target_symbols):
+                    current_end = now_ts
+                    while current_end > stop_ts:
+                        current_start = current_end - window_size
+                        if current_start < stop_ts: current_start = stop_ts 
+                        
+                        msg = f"⛏️ [{i+1}/{total_targets}] {symbol}: 查区间 {datetime.fromtimestamp(current_start/1000).strftime('%Y-%m-%d')}..."
+                        if progress_callback: progress_callback(msg, 50)
+                        
+                        try:
+                            trades = exchange.fetch_my_trades(symbol=symbol, since=current_start, limit=1000, params={'endTime': current_end})
+                            if trades: all_trades.extend(trades)
+                            current_end = current_start
+                            if current_end <= stop_ts: break
+                            time.sleep(0.3)
+                        except:
+                            current_end = current_start 
+                            time.sleep(1)
+
+            if not all_trades: 
+                return f"✅ 扫描完成。未发现新数据。", 0
+            if progress_callback: progress_callback(f"💾 保存 {len(all_trades)} 条记录...", 95)
+            new_count = self._save_to_db(all_trades, key_tag)
+            if progress_callback: progress_callback("✅ 完成！", 100)
+            return f"✅ 同步成功！新增 {new_count} 条记录", new_count
+        except Exception as e:
+            return f"❌ 同步过程出错: {str(e)}", 0
+    
+    # ===========================
+    #  📡 实时数据获取 (v6.1 修复版)
+    # ===========================
+    def get_open_positions(self, api_key, secret):
+        """
+        获取当前交易所的持仓信息 (仅限 U本位合约)
+        """
+        exchange = self.get_exchange(api_key, secret)
+        if not exchange:
+            return None, "❌ 无法连接交易所"
+            
+        try:
+            # 获取余额
+            try:
+                balance_info = exchange.fetch_balance()
+                usdt_equity = float(balance_info['USDT']['total']) if 'USDT' in balance_info else 0.0
+            except:
+                usdt_equity = 0.0  # 容错
+            
+            # 获取持仓
+            positions = exchange.fetch_positions()
+            active_positions = []
+            
+            for p in positions:
+                # 过滤掉数量为 0 的空仓
+                # 有些交易所 contracts 可能是 None，加个安全转换
+                contracts = float(p.get('contracts') or 0)
+                
+                if contracts > 0:
+                    entry_price = float(p.get('entryPrice') or 0)
+                    current_price = float(p.get('markPrice') or 0)
+                    amount = contracts
+                    side = str(p.get('side')).upper()
+                    unrealized_pnl = float(p.get('unrealizedPnl') or 0)
+                    
+                    # --- 核心修复：安全获取杠杆 ---
+                    # 如果 leverage 是 None 或 0，强制设为 1，防止除法报错
+                    raw_leverage = p.get('leverage')
+                    leverage = float(raw_leverage) if raw_leverage else 1.0
+                    
+                    # 计算 ROI (防止除以 0)
+                    # 成本 = (均价 * 数量) / 杠杆
+                    position_cost = (entry_price * amount) / leverage if leverage > 0 else 0
+                    
+                    if position_cost > 0:
+                        roi = (unrealized_pnl / position_cost) * 100
+                    else:
+                        roi = 0.0
+                    
+                    active_positions.append({
+                        'symbol': p['symbol'],
+                        'side': side,
+                        'amount': amount,
+                        'entry_price': entry_price,
+                        'mark_price': current_price,
+                        'leverage': leverage,
+                        'pnl': unrealized_pnl,
+                        'roi': roi,
+                        'liquidation_price': float(p.get('liquidationPrice') or 0)
+                    })
+            
+            return {
+                'equity': usdt_equity,
+                'positions': active_positions
+            }, "OK"
+            
+        except Exception as e:
+            import traceback
+            traceback.print_exc()  # 打印详细错误堆栈到后台，方便调试
+            return None, f"获取持仓失败: {str(e)}"
 
     def _save_to_db(self, trades, key_tag):
         conn = sqlite3.connect(self.db_path)

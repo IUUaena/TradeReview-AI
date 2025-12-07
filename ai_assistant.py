@@ -437,3 +437,80 @@ def review_potential_trade(api_key, base_url, plan_data, system_manifesto, model
         return response.choices[0].message.content
     except Exception as e:
         return f"风控审查失败: {str(e)}"
+
+def analyze_live_positions(api_key, base_url, positions_data, system_manifesto, model_name="deepseek-chat"):
+    """
+    v6.0 事中风控：实时持仓分析
+    """
+    try:
+        # 防御性 URL 修正 (针对 Google Gemini)
+        if "generativelanguage" in base_url and "openai" not in base_url:
+            if base_url.endswith("/"): 
+                base_url += "openai/"
+            else:
+                base_url += "/openai/"
+        
+        client = get_client(api_key, base_url)
+        
+        equity = positions_data['equity']
+        positions = positions_data['positions']
+        
+        if not positions:
+            return "✅ 当前空仓，心态平和，静待机会。"
+            
+        # 1. 构建持仓摘要
+        pos_str_list = []
+        total_unrealized_pnl = 0
+        
+        for p in positions:
+            total_unrealized_pnl += p['pnl']
+            roi_emoji = "🔥" if p['roi'] < -20 else ("🟢" if p['roi'] > 0 else "🔴")
+            pos_str_list.append(
+                f"- {p['symbol']} ({p['side']} x{p['leverage']}): "
+                f"浮盈亏 ${p['pnl']:.2f} ({p['roi']:.2f}%) {roi_emoji} | "
+                f"开仓 {p['entry_price']} -> 现价 {p['mark_price']}"
+            )
+            
+        pos_context = "\n".join(pos_str_list)
+        risk_exposure = (total_unrealized_pnl / equity) * 100
+        
+        context = f"""
+        【当前账户实时快照】
+        - 账户净值: ${equity:.2f}
+        - 当前浮动盈亏: ${total_unrealized_pnl:.2f} (风险敞口: {risk_exposure:.2f}%)
+        
+        【持仓明细】
+        {pos_context}
+        """
+        
+        # 2. 系统提示词
+        system_prompt = f"""
+        你是一名【实时交易战术顾问】。交易员正在持仓，可能正处于情绪波动中。
+        
+        【系统宪法 (他的铁律)】:
+        "{system_manifesto}"
+        
+        请根据当前持仓进行**紧急战术指导**：
+        1. **风险警报**：如果浮亏过大（尤其是接近宪法止损线），请大声喝止他，让他立刻行动。
+        2. **浮盈管理**：如果浮盈很大，提醒他注意移动止损或分批止盈，不要贪婪（参考宪法）。
+        3. **杠杆/重仓**：检查他是否违背了仓位管理原则。
+        请用简短、有力、命令式的语气。不要废话。
+        """
+        
+        # 3. 调用 API
+        api_params = {
+            "model": model_name,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"请分析我的实时持仓：\n{context}"}
+            ],
+            "timeout": 30
+        }
+        
+        if "reasoner" not in model_name:
+            api_params["temperature"] = 0.3
+        
+        response = call_api_with_retry(client, api_params)
+        return response.choices[0].message.content
+    except Exception as e:
+        return f"实时分析失败: {str(e)}"
