@@ -6,7 +6,7 @@ import plotly.express as px
 from data_engine import TradeDataEngine
 from data_processor import process_trades_to_rounds # 引入核心逻辑
 from word_exporter import WordExporter
-from ai_assistant import generate_batch_review, generate_batch_review_v3, audit_single_trade
+from ai_assistant import generate_batch_review, generate_batch_review_v3, audit_single_trade, review_potential_trade
 from datetime import datetime
 
 # ==============================================================================
@@ -121,6 +121,19 @@ st.markdown(f"""
 engine = TradeDataEngine()
 
 # ==============================================================================
+# 初始化：从数据库加载 AI 配置到 session_state
+# ==============================================================================
+if 'ai_key' not in st.session_state:
+    st.session_state['ai_key'] = engine.get_setting('ai_key', '')
+if 'ai_base_url' not in st.session_state:
+    st.session_state['ai_base_url'] = engine.get_setting('ai_base_url', 'https://api.deepseek.com')
+if 'system_manifesto' not in st.session_state:
+    st.session_state['system_manifesto'] = engine.get_setting('system_manifesto', 
+        "1. 绝不扛单，亏损达到 2% 无条件止损。\n2. 只做日线级别的顺势交易。\n3. 连续亏损 2 笔强制停止交易一天。")
+if 'ai_model' not in st.session_state:
+    st.session_state['ai_model'] = engine.get_setting('ai_model', 'deepseek-chat')
+
+# ==============================================================================
 # 2. 侧边栏：经典还原版 (你最喜欢的版本)
 # ==============================================================================
 with st.sidebar:
@@ -142,24 +155,95 @@ with st.sidebar:
             
         st.divider()
         
-        # --- B. AI 配置 (v3.0 增强) ---
+        # --- B. AI 配置 (v3.9 多厂商支持) ---
         with st.expander("🧠 AI 导师 & 系统配置"):
-            ai_base_url = st.text_input("API Base URL", value=st.session_state.get('ai_base_url', "https://api.deepseek.com"), placeholder="https://api.deepseek.com")
-            ai_key = st.text_input("AI API Key", type="password", value=st.session_state.get('ai_key', ''), help="推荐 DeepSeek")
+            # 预设厂商配置
+            PROVIDER_PRESETS = {
+                "DeepSeek (默认)": {
+                    "url": "https://api.deepseek.com",
+                    "models": ["deepseek-chat", "deepseek-reasoner"]
+                },
+            "Google Gemini": {
+                # 务必确保末尾有斜杠 /，防止 Python openai 库 URL 拼接出错
+                "url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+                # 模型名直接使用纯 ID（不带 models/ 前缀）
+                "models": [
+                    "gemini-1.5-flash",      # 推荐：目前最稳的免费版
+                    "gemini-1.5-pro",        # 推荐：最聪明的版本
+                    "gemini-2.0-flash-exp",  # 实验版：虽然强但极易 429
+                    "gemini-1.5-flash-8b"    # 超轻量级
+                ]
+            },
+                "OpenAI (官方)": {
+                    "url": "https://api.openai.com/v1",
+                    "models": ["gpt-4o", "gpt-4-turbo"]
+                }
+            }
             
-            st.markdown("---")
-            st.caption("📜 **System Manifesto (系统宪法)**")
-            st.caption("告诉 AI 你的交易规则，它将据此监督你。")
-            default_manifesto = st.session_state.get('system_manifesto', 
+            # 1. 厂商快速选择
+            selected_provider = st.selectbox("🌍 快速选择 AI 厂商", list(PROVIDER_PRESETS.keys()))
+            
+            # 自动填充（如果用户点击了应用预设）
+            if st.button("应用厂商预设 (自动填 URL)"):
+                preset = PROVIDER_PRESETS[selected_provider]
+                engine.set_setting('ai_base_url', preset['url'])
+                # 默认选第一个模型
+                engine.set_setting('ai_model', preset['models'][0])
+                st.rerun()
+            
+            # === 强制修复 Google 连接按钮 ===
+            if st.button("🔧 强制修复 Google 连接 (Fix v1main Error)"):
+                # 官方唯一正确的 OpenAI 兼容地址 (必须包含 v1beta 和 openai)
+                CORRECT_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+                
+                # 强制写入数据库
+                engine.set_setting('ai_base_url', CORRECT_URL)
+                engine.set_setting('ai_model', "gemini-1.5-flash")  # 重置为最稳的模型
+                
+                # 强制刷新 Session
+                st.session_state['ai_base_url'] = CORRECT_URL
+                st.session_state['ai_model'] = "gemini-1.5-flash"
+                
+                st.success(f"已强制修复 URL 为: {CORRECT_URL}")
+                st.info("请重新点击下方的 '保存配置' 按钮以确保生效！")
+            
+            # 2. 加载当前配置
+            db_base_url = engine.get_setting('ai_base_url', "https://api.deepseek.com")
+            db_key = engine.get_setting('ai_key', "")
+            db_model = engine.get_setting('ai_model', "deepseek-chat") 
+            db_manifesto = engine.get_setting('system_manifesto', 
                 "1. 绝不扛单，亏损达到 2% 无条件止损。\n2. 只做日线级别的顺势交易。\n3. 连续亏损 2 笔强制停止交易一天。")
             
-            system_manifesto = st.text_area("我的交易铁律", value=default_manifesto, height=150)
+            # 3. 输入框 (允许微调)
+            ai_base_url = st.text_input("API Base URL", value=db_base_url)
+            ai_key = st.text_input("AI API Key", type="password", value=db_key)
+            
+            # 模型选择 (合并预设模型和当前模型)
+            current_preset_models = PROVIDER_PRESETS.get(selected_provider, {}).get("models", [])
+            if db_model not in current_preset_models:
+                current_preset_models.insert(0, db_model)
+                
+            ai_model = st.selectbox(
+                "Model Name (模型选择)", 
+                options=current_preset_models,
+                index=0 if db_model not in current_preset_models else current_preset_models.index(db_model)
+            )
+            
+            st.markdown("---")
+            st.caption("📜 System Manifesto (系统宪法)")
+            system_manifesto = st.text_area("我的交易铁律", value=db_manifesto, height=150)
             
             if st.button("💾 保存配置"):
+                engine.set_setting('ai_base_url', ai_base_url)
+                engine.set_setting('ai_key', ai_key)
+                engine.set_setting('ai_model', ai_model)
+                engine.set_setting('system_manifesto', system_manifesto)
+                
                 st.session_state['ai_base_url'] = ai_base_url
                 st.session_state['ai_key'] = ai_key
+                st.session_state['ai_model'] = ai_model
                 st.session_state['system_manifesto'] = system_manifesto
-                st.success("配置已保存！AI 已熟读你的宪法。")
+                st.success(f"已保存! 当前模型: {ai_model}")
         
         st.divider()
         
@@ -188,9 +272,9 @@ with st.sidebar:
                     st.error(msg)
         
         # --- C. Word 导出功能 (新增) ---
+        # --- C. Word 导出功能 (v3.7 双模式) ---
         with st.expander("📄 导出 Word 报告"):
-            st.markdown("**导出交易复盘报告到 Word 文档**")
-            st.caption("包含交易数据、笔记和截图，可直接发给 AI 分析")
+            st.markdown("**导出复盘数据包**")
             
             export_time_range = st.selectbox(
                 "时间范围",
@@ -198,15 +282,18 @@ with st.sidebar:
                 key="export_time_range"
             )
             
-            # 映射中文到英文
-            time_range_map = {
-                "最近一周": "week",
-                "最近一月": "month",
-                "最近一年": "year",
-                "全部历史": "all"
-            }
+            # 新增：模式选择
+            export_mode_cn = st.radio(
+                "报告类型",
+                ["完整版 (含 AI 审计结论)", "原始版 (供其他 AI 分析)"],
+                captions=["存档用：包含心态评分、执行质量及 AI 的毒舌点评。", "投喂用：仅包含原始数据、截图和你的笔记，纯净无干扰。"]
+            )
             
-            if st.button("📥 导出 Word 报告", use_container_width=True, type="primary"):
+            # 映射参数
+            time_range_map = {"最近一周": "week", "最近一月": "month", "最近一年": "year", "全部历史": "all"}
+            mode_map = {"完整版 (含 AI 审计结论)": "full", "原始版 (供其他 AI 分析)": "raw"}
+            
+            if st.button("📥 开始生成报告", use_container_width=True, type="primary"):
                 if selected_key:
                     # 加载数据
                     raw_df = engine.load_trades(selected_key)
@@ -229,12 +316,13 @@ with st.sidebar:
                             )
                             
                             # 导出（rounds_df 和 raw_df 已经按账户筛选过了）
-                            with st.spinner("正在生成 Word 文档，请稍候..."):
+                            with st.spinner("正在生成文档..."):
                                 file_path, message = exporter.export_round_trips_to_word(
                                     rounds_df,
                                     raw_df,
                                     api_key_tag=key_tag,
-                                    time_range=time_range_map[export_time_range]
+                                    time_range=time_range_map[export_time_range],
+                                    mode=mode_map[export_mode_cn]  # 传入用户选择的模式
                                 )
                             
                             if file_path:
@@ -248,18 +336,18 @@ with st.sidebar:
                                 if os.name == 'nt' and abs_file_path.startswith('D:\\'):
                                     st.caption(f"💡 提示：文件已保存在 Windows 本地路径")
                                 
-                                # 提供下载按钮
+                                # 提供下载
                                 try:
                                     with open(file_path, 'rb') as f:
                                         st.download_button(
-                                            label="💾 下载 Word 文档",
+                                            label="💾 点击下载文档",
                                             data=f.read(),
                                             file_name=os.path.basename(file_path),
                                             mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                                             use_container_width=True
                                         )
                                 except Exception as e:
-                                    st.warning(f"无法创建下载链接: {e}")
+                                    st.info(f"文件已保存至: {file_path}")
                             else:
                                 st.error(message)
                 else:
@@ -308,6 +396,80 @@ if selected_key:
         if rounds_df.empty:
             st.warning("🤔 有数据，但没有检测到完整的【开仓-平仓】闭环。请确认是否有已平仓的订单。")
         else:
+            # ======================================================================
+            # 0. v3.3 智能风控沙盘 (Pre-Trade Sandbox)
+            # ======================================================================
+            with st.expander("🛡️ 智能风控沙盘 (开仓计算器 + AI 拦截)", expanded=False):
+                st.caption("✋ 开仓前先来这里！输入你的止损和风险额度，AI 帮你把关。")
+                
+                sb_col1, sb_col2, sb_col3 = st.columns([1, 1, 2])
+                
+                with sb_col1:
+                    sb_symbol = st.text_input("标的 (Symbol)", value="BTCUSDT", key="sb_symbol").upper()
+                    sb_risk = st.number_input("💸 单笔风险金额 ($)", value=100.0, step=10.0, help="以损定仓：这笔交易你最多愿意亏多少钱？")
+                    
+                with sb_col2:
+                    sb_entry = st.number_input("入场价 (Entry)", value=0.0, step=0.1, format="%.5f")
+                    sb_sl = st.number_input("🛑 止损价 (Stop Loss)", value=0.0, step=0.1, format="%.5f")
+                    sb_tp = st.number_input("🎯 止盈价 (Take Profit)", value=0.0, step=0.1, format="%.5f")
+                    
+                with sb_col3:
+                    st.markdown("##### 📊 实时计算结果")
+                    if sb_entry > 0 and sb_sl > 0:
+                        # 自动计算
+                        risk_diff = abs(sb_entry - sb_sl)
+                        direction_str = "🟢 做多 (Long)" if sb_entry > sb_sl else "🔴 做空 (Short)"
+                        
+                        if risk_diff == 0:
+                            st.error("止损价不能等于入场价")
+                        else:
+                            # 核心公式：数量 = 风险金额 / 止损差价
+                            qty_suggest = sb_risk / risk_diff
+                            position_value = qty_suggest * sb_entry
+                            
+                            # 盈亏比
+                            rr_display = "N/A"
+                            if sb_tp > 0:
+                                reward_diff = abs(sb_tp - sb_entry)
+                                rr = reward_diff / risk_diff
+                                rr_color = "green" if rr >= 2.0 else "red"
+                                rr_display = f":{rr_color}[{rr:.2f}]"
+                            
+                            # 显示大字报
+                            st.markdown(f"**方向**: {direction_str}")
+                            st.markdown(f"**建议仓位**: :blue[{qty_suggest:.4f} 个] ({sb_symbol})")
+                            st.markdown(f"**持仓价值**: ${position_value:,.2f}")
+                            st.markdown(f"**盈亏比 (R:R)**: {rr_display}")
+                            
+                            # AI 拦截按钮
+                            if st.button("🤖 呼叫 AI 风控官审查", type="primary", use_container_width=True):
+                                if 'ai_key' not in st.session_state or not st.session_state['ai_key']:
+                                    st.error("请先在左侧配置 AI Key")
+                                else:
+                                    with st.spinner("AI 正在核对你的系统宪法..."):
+                                        plan_data = {
+                                            "symbol": sb_symbol,
+                                            "entry": sb_entry,
+                                            "sl": sb_sl,
+                                            "tp": sb_tp,
+                                            "risk_money": sb_risk
+                                        }
+                                        manifesto = st.session_state.get('system_manifesto', '')
+                                        # 获取配置的模型名称 (v3.5)
+                                        curr_model = st.session_state.get('ai_model', 'deepseek-chat')
+                                        res = review_potential_trade(
+                                            st.session_state['ai_key'],
+                                            st.session_state['ai_base_url'],
+                                            plan_data,
+                                            manifesto,
+                                            curr_model  # 传入模型名称
+                                        )
+                                        st.info(res)
+                    else:
+                        st.info("👈 请输入价格以获取计算结果")
+            
+            st.markdown("---")
+            
             # ======================================================================
             # 顶部标题栏（带手动录入按钮）
             # ======================================================================
@@ -736,7 +898,7 @@ if selected_key:
             # 交易列表和复盘区域 (使用 Tab 分隔)
             # ======================================================================
             # 使用 Tab 分隔功能区
-            tab_list, tab_report = st.tabs(["📋 交易复盘", "🔥 导师周报"])
+            tab_list, tab_analysis, tab_report, tab_strategy = st.tabs(["📋 交易复盘", "📊 归因分析", "🔥 导师周报", "📚 策略库"])
             
             # === Tab 1: 原有的交易列表与详情 ===
             with tab_list:
@@ -1053,19 +1215,28 @@ if selected_key:
                     col_strat, col_tags = st.columns([1, 1])
                     
                     with col_strat:
-                        # 策略 (这里未来可以做成从配置读取的下拉菜单，目前先用文本框+自动补全)
-                        # 我们提供一些常见的策略作为 suggestions
-                        STRATEGY_SUGGESTIONS = ["趋势突破", "区间震荡", "EMA回调", "斐波那契回撤", "超跌反弹", "新闻事件"]
-                        strategy_options = list(set([curr_strategy] + STRATEGY_SUGGESTIONS)) if curr_strategy else STRATEGY_SUGGESTIONS
-                        # 确保 curr_strategy 在列表中
-                        if curr_strategy and curr_strategy not in strategy_options:
-                            strategy_options.insert(0, curr_strategy)
+                        # 动态获取策略列表
+                        all_strategies_dict = engine.get_all_strategies()
+                        available_strategies = list(all_strategies_dict.keys())
+                        
+                        # 确保当前策略在列表里
+                        if curr_strategy and curr_strategy not in available_strategies:
+                            available_strategies.append(curr_strategy)
+                        
+                        # 如果列表为空，提供默认提示
+                        if not available_strategies:
+                            available_strategies = ["请先在侧边栏添加策略"]
+                        
                         new_strategy = st.selectbox(
                             "📉 Strategy (策略依据)",
-                            options=strategy_options,
-                            index=0,
-                            help="这笔交易属于你系统里的哪一招？"
+                            options=available_strategies,
+                            index=available_strategies.index(curr_strategy) if curr_strategy in available_strategies else 0,
+                            help="AI 会根据侧边栏配置的策略规则进行审核"
                         )
+                        
+                        # 显示选中策略的规则提示 (方便你自己看)
+                        if new_strategy in all_strategies_dict:
+                            st.caption(f"📝 规则: {all_strategies_dict[new_strategy][:50]}...")
                     with col_tags:
                         # 错误标签 (多选)
                         new_mistakes = st.multiselect(
@@ -1091,11 +1262,21 @@ if selected_key:
                             screenshot_path = os.path.join(upload_dir, screenshot_name)
                             if os.path.exists(screenshot_path):
                                 st.image(screenshot_path, use_container_width=True)
+                                
+                                # === 新增：删除按钮 ===
+                                if st.button("🗑️ 删除这张截图", key=f"del_img_{trade['round_id']}"):
+                                    ok, msg = engine.delete_screenshot(trade['round_id'], selected_key)
+                                    if ok:
+                                        st.success(msg)
+                                        time.sleep(0.5)
+                                        st.rerun()
+                                    else:
+                                        st.error(msg)
                             else:
                                 st.warning("⚠️ 截图文件丢失")
                         
                         # 允许重新上传
-                        new_screenshot = st.file_uploader("更新截图", type=['png', 'jpg', 'jpeg'])
+                        new_screenshot = st.file_uploader("上传/替换截图", type=['png', 'jpg', 'jpeg'])
                     # --- 保存按钮 ---
                     save_col1, save_col2 = st.columns([3, 1])
                     with save_col2:
@@ -1175,12 +1356,30 @@ if selected_key:
                                 if 'direction' not in trade_data_dict:
                                     trade_data_dict['direction'] = trade.get('direction', '')
                                 
+                                # 获取当前策略的规则描述
+                                all_strats = engine.get_all_strategies()
+                                current_strat_rules = all_strats.get(new_strategy, "")
+                                
+                                # 获取图片路径 (v3.4 Vision)
+                                screenshot_full_path = None
+                                if pd.notna(screenshot_name) and screenshot_name:
+                                    upload_dir = os.path.join(os.path.dirname(engine.db_path), 'uploads')
+                                    possible_path = os.path.join(upload_dir, screenshot_name)
+                                    if os.path.exists(possible_path):
+                                        screenshot_full_path = possible_path
+                                
+                                # 获取配置的模型名称
+                                curr_model = st.session_state.get('ai_model', 'deepseek-chat')
+                                
                                 # 调用 AI
                                 audit_result = audit_single_trade(
                                     st.session_state['ai_key'],
                                     st.session_state.get('ai_base_url', 'https://api.deepseek.com'),
                                     trade_data_dict,
-                                    st.session_state.get('system_manifesto', '')
+                                    st.session_state.get('system_manifesto', ''),
+                                    current_strat_rules,  # 传入策略规则
+                                    image_path=screenshot_full_path,  # 传入图片路径 (v3.4)
+                                    model_name=curr_model  # 传入模型名称 (v3.4)
                                 )
                                 
                                 # 保存结果到数据库
@@ -1203,7 +1402,134 @@ if selected_key:
                     </div>
                     """, unsafe_allow_html=True)
             
-            # === Tab 2: 新增的 AI 批量分析 ===
+            # === Tab 2: 归因分析 (v3.2 新增) ===
+            with tab_analysis:
+                st.subheader("📊 交易归因分析 (Mirror of Truth)")
+                st.caption("用数据回答：是什么在赚钱？是什么在亏钱？")
+                
+                if rounds_df.empty:
+                    st.info("暂无数据，请先录入交易。")
+                else:
+                    # 准备数据：确保 v3.0 字段存在，如果不存在填默认值
+                    analysis_df = rounds_df.copy()
+                    
+                    # 辅助函数：从原始 raw_df 获取 v3.0 字段 (因为 process_trades_to_rounds 可能还没包含这些新字段)
+                    # 我们需要临时去 raw_df 查一下补充进来
+                    def get_meta_field(round_id, field_name, default_val):
+                        # 处理手动录入的交易 ID（可能带有 _OPEN 或 _CLOSE 后缀）
+                        base_id = str(round_id).replace('_OPEN', '').replace('_CLOSE', '')
+                        
+                        # 先尝试直接用 round_id 查找
+                        rows = raw_df[raw_df['id'] == round_id]
+                        if rows.empty:
+                            # 如果没找到，尝试用 base_id 查找（手动录入的情况）
+                            rows = raw_df[raw_df['id'] == base_id]
+                        
+                        if not rows.empty:
+                            val = rows.iloc[0].get(field_name)
+                            # 处理不同类型
+                            if field_name == 'setup_rating':
+                                try:
+                                    return int(val) if pd.notna(val) and val != "" and val != 0 else default_val
+                                except:
+                                    return default_val
+                            return val if pd.notna(val) and val != "" else default_val
+                        return default_val
+                    
+                    # 批量补充字段到 analysis_df
+                    analysis_df['mental_state'] = analysis_df['round_id'].apply(lambda x: get_meta_field(x, 'mental_state', 'Unknown'))
+                    analysis_df['strategy'] = analysis_df['round_id'].apply(lambda x: get_meta_field(x, 'strategy', 'Undefined'))
+                    analysis_df['process_tag'] = analysis_df['round_id'].apply(lambda x: get_meta_field(x, 'process_tag', 'Unknown'))
+                    analysis_df['setup_rating'] = analysis_df['round_id'].apply(lambda x: get_meta_field(x, 'setup_rating', 0))
+                    
+                    st.markdown("---")
+                    # --- 第一行：心态与执行 (饼图/柱状图) ---
+                    col_a1, col_a2 = st.columns(2)
+                    
+                    with col_a1:
+                        st.markdown("**🧠 心态盈亏分布 (PnL by Mental State)**")
+                        # 按心态分组统计总盈亏
+                        mental_pnl = analysis_df.groupby('mental_state')['net_pnl'].sum().reset_index()
+                        
+                        fig_mental = px.bar(
+                            mental_pnl, x='mental_state', y='net_pnl',
+                            color='net_pnl',
+                            color_continuous_scale=['#FF5252', '#4CAF50'],
+                            labels={'net_pnl': '净盈亏($)', 'mental_state': '心理状态'}
+                        )
+                        fig_mental.update_layout(plot_bgcolor='#1E1E1E', paper_bgcolor='#1E1E1E', font=dict(color='#E0E0E0'))
+                        st.plotly_chart(fig_mental, use_container_width=True)
+                        
+                    with col_a2:
+                        st.markdown("**⚖️ 知行合一率 (Process Quality)**")
+                        # 统计各执行质量的单数
+                        process_counts = analysis_df['process_tag'].value_counts().reset_index()
+                        process_counts.columns = ['process_tag', 'count']
+                        
+                        fig_process = px.pie(
+                            process_counts, values='count', names='process_tag',
+                            hole=0.4,
+                            color='process_tag',
+                            color_discrete_map={
+                                "✅ Good Process (知行合一)": "#4CAF50",
+                                "❌ Bad Process (乱做)": "#FF5252",
+                                "🍀 Lucky (运气好)": "#FFC107",
+                                "💀 Disaster (灾难)": "#9C27B0"
+                            }
+                        )
+                        fig_process.update_layout(plot_bgcolor='#1E1E1E', paper_bgcolor='#1E1E1E', font=dict(color='#E0E0E0'))
+                        st.plotly_chart(fig_process, use_container_width=True)
+                    
+                    st.markdown("---")
+                    # --- 第二行：策略效能 (横向柱状图) ---
+                    st.markdown("**📉 策略效能排行榜 (PnL by Strategy)**")
+                    
+                    strat_stats = analysis_df.groupby('strategy').agg(
+                        total_pnl=('net_pnl', 'sum'),
+                        trade_count=('round_id', 'count'),
+                        win_rate=('net_pnl', lambda x: (x > 0).sum() / len(x) * 100)
+                    ).reset_index()
+                    
+                    # 过滤掉未定义的
+                    strat_stats = strat_stats[strat_stats['strategy'] != 'Undefined']
+                    
+                    if not strat_stats.empty:
+                        fig_strat = px.bar(
+                            strat_stats.sort_values(by='total_pnl', ascending=True), 
+                            x='total_pnl', y='strategy',
+                            orientation='h',
+                            text='trade_count',
+                            color='total_pnl',
+                            color_continuous_scale=['#FF5252', '#4CAF50'],
+                            labels={'total_pnl': '总盈亏($)', 'strategy': '策略名称', 'trade_count': '交易次数'}
+                        )
+                        fig_strat.update_traces(texttemplate='%{text}笔', textposition='outside')
+                        fig_strat.update_layout(plot_bgcolor='#1E1E1E', paper_bgcolor='#1E1E1E', font=dict(color='#E0E0E0'))
+                        st.plotly_chart(fig_strat, use_container_width=True)
+                    else:
+                        st.caption("暂无策略数据，请在复盘时选择策略。")
+                    
+                    st.markdown("---")
+                    # --- 第三行：评分与盈亏的相关性 (散点图) ---
+                    st.markdown("**⭐ 机会评分 vs 实际盈亏 (Rating Correlation)**")
+                    st.caption("验证你的眼光：高分的机会真的赚得更多吗？")
+                    
+                    # 过滤掉0分的
+                    rating_df = analysis_df[analysis_df['setup_rating'] > 0]
+                    
+                    if not rating_df.empty:
+                        fig_rating = px.box(
+                            rating_df, x='setup_rating', y='net_pnl',
+                            color='setup_rating',
+                            points="all", # 显示所有点
+                            labels={'setup_rating': '机会评分 (1-10)', 'net_pnl': '单笔盈亏($)'}
+                        )
+                        fig_rating.update_layout(plot_bgcolor='#1E1E1E', paper_bgcolor='#1E1E1E', font=dict(color='#E0E0E0'))
+                        st.plotly_chart(fig_rating, use_container_width=True)
+                    else:
+                        st.caption("暂无评分数据。")
+            
+            # === Tab 3: 新增的 AI 批量分析 ===
             with tab_report:
                 st.subheader("🔥 交易行为深度诊断")
                 st.caption('AI 导师将分析你最近的交易记录，寻找那些你自己都没发现的"亏损模式"。')
@@ -1233,17 +1559,47 @@ if selected_key:
                                 elif report_mode == "本月交易":
                                     target_df = target_df.head(100)  # 临时方案
                                 
+                                # === 核心修复：给缺失的列打补丁 ===
+                                # 防止老数据没有这些列导致报错
+                                # 从 raw_df 中补充 v3.0 字段（process_trades_to_rounds 可能没有这些字段）
+                                required_cols = ['mental_state', 'process_tag', 'mistake_tags', 'setup_rating']
+                                for col in required_cols:
+                                    if col not in target_df.columns:
+                                        # 尝试从 raw_df 中获取该字段
+                                        target_df[col] = target_df['round_id'].apply(
+                                            lambda rid: raw_df[raw_df['id'] == rid][col].iloc[0] 
+                                            if not raw_df[raw_df['id'] == rid].empty and col in raw_df.columns 
+                                            else '-'
+                                        )
+                                    else:
+                                        # 填充 NaN 值
+                                        target_df[col] = target_df[col].fillna('-')
+                                
+                                # 确保 notes 和 strategy 也填充默认值
+                                if 'notes' not in target_df.columns:
+                                    target_df['notes'] = '-'
+                                else:
+                                    target_df['notes'] = target_df['notes'].fillna('-')
+                                
+                                if 'strategy' not in target_df.columns:
+                                    target_df['strategy'] = '-'
+                                else:
+                                    target_df['strategy'] = target_df['strategy'].fillna('-')
+                                
                                 # 2. 调用 AI (v3.0)
                                 from ai_assistant import generate_batch_review_v3
                                 ai_key = st.session_state.get('ai_key', '')
                                 ai_base_url = st.session_state.get('ai_base_url', 'https://api.deepseek.com')
                                 
+                                # 获取配置的模型名称 (v3.5)
+                                curr_model = st.session_state.get('ai_model', 'deepseek-chat')
                                 report_content = generate_batch_review_v3(
                                     ai_key, 
                                     ai_base_url, 
                                     target_df,
                                     st.session_state.get('system_manifesto', ''),  # 传入宪法
-                                    report_mode
+                                    report_mode,
+                                    curr_model  # 传入模型名称
                                 )
                                 
                                 # 3. 保存报告
@@ -1299,6 +1655,52 @@ if selected_key:
                                 st.info("👈 请点击左侧按钮生成你的第一份诊断报告。")
                         else:
                             st.info("👈 请先选择账户并配置 AI API Key。")
+            
+            # === Tab 4: 策略库管理 (从侧边栏移到这里) ===
+            with tab_strategy:
+                st.subheader("📚 策略库管理 (Strategy Library)")
+                st.caption("定义你的每一招，AI 会检查你是否动作变形。")
+                
+                all_strategies = engine.get_all_strategies()
+                strategy_names = list(all_strategies.keys()) if all_strategies else []
+                
+                col_st1, col_st2 = st.columns([1, 1])
+                
+                with col_st1:
+                    st.markdown("##### ➕ 新建策略")
+                    new_strat_name = st.text_input("策略名称", placeholder="例如：超跌反弹", key="new_strat_name_main")
+                    new_strat_desc = st.text_area("策略军规 (AI 审核依据)", placeholder="1. 必须偏离均线过远...\n2. 必须出现背离...", height=150, key="new_strat_desc_main")
+                    if st.button("添加策略", key="add_strat_main"):
+                        if new_strat_name and new_strat_desc:
+                            ok, msg = engine.save_strategy(new_strat_name, new_strat_desc)
+                            if ok: 
+                                st.success(msg)
+                                time.sleep(0.5)
+                                st.rerun()
+                        else:
+                            st.error("请填写完整")
+                
+                with col_st2:
+                    st.markdown("##### ✏️ 编辑现有策略")
+                    if strategy_names:
+                        edit_target = st.selectbox("选择策略", strategy_names, key="edit_target_main")
+                        edit_desc_input = st.text_area("编辑规则", value=all_strategies[edit_target], height=150, key="edit_strat_desc_main")
+                        
+                        btn_col1, btn_col2 = st.columns(2)
+                        with btn_col1:
+                            if st.button("保存修改", key="save_strat_btn_main", use_container_width=True):
+                                engine.save_strategy(edit_target, edit_desc_input)
+                                st.success("已更新")
+                                time.sleep(0.5)
+                                st.rerun()
+                        with btn_col2:
+                            if st.button("删除策略", key="del_strat_btn_main", use_container_width=True):
+                                engine.delete_strategy(edit_target)
+                                st.success("已删除")
+                                time.sleep(0.5)
+                                st.rerun()
+                    else:
+                        st.info("暂无策略，请在左侧创建第一个策略")
 else:
     # 登录引导页
     st.markdown("""

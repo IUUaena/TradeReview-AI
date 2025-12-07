@@ -75,6 +75,22 @@ class TradeDataEngine:
             )
         ''')
         
+        # 4. [v3.1 新增] 策略库表
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS strategies (
+                name TEXT PRIMARY KEY,
+                description TEXT
+            )
+        ''')
+        
+        # 5. [Bug Fix] 系统配置表
+        c.execute('''
+            CREATE TABLE IF NOT EXISTS system_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        ''')
+        
         conn.commit()
         conn.close()
 
@@ -405,6 +421,51 @@ class TradeDataEngine:
             conn.close()
             return False, f"❌ 录入失败: {str(e)}"
     
+    def delete_screenshot(self, trade_id, api_key):
+        """删除交易截图"""
+        # 提取 ID (兼容 MANUAL_xxx_OPEN 格式)
+        key_tag = api_key.strip()[-4:]
+        base_id = trade_id.replace('_OPEN', '').replace('_CLOSE', '')
+        
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        try:
+            # 1. 获取文件名 (用于删文件)
+            # 检查手动单
+            c.execute("SELECT screenshot FROM trades WHERE id LIKE ? AND api_key_tag = ?", (f"{base_id}%_OPEN", key_tag))
+            row = c.fetchone()
+            if not row:
+                # 检查 API 单
+                c.execute("SELECT screenshot FROM trades WHERE id = ? AND api_key_tag = ?", (base_id, key_tag))
+                row = c.fetchone()
+            
+            if row and row[0]:
+                filename = row[0]
+                # 2. 清空数据库字段
+                # 更新手动单 (OPEN)
+                c.execute("UPDATE trades SET screenshot = '' WHERE id LIKE ? AND api_key_tag = ?", (f"{base_id}%_OPEN", key_tag))
+                # 更新 API 单
+                c.execute("UPDATE trades SET screenshot = '' WHERE id = ? AND api_key_tag = ?", (base_id, key_tag))
+                
+                conn.commit()
+                
+                # 3. 删除物理文件 (可选，为了节省空间建议删除)
+                try:
+                    upload_dir = os.path.join(os.path.dirname(self.db_path), 'uploads')
+                    file_path = os.path.join(upload_dir, filename)
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
+                except:
+                    pass # 文件删不掉也不影响业务
+                
+                return True, "🗑️ 截图已删除"
+            else:
+                return False, "未找到截图记录"
+        except Exception as e:
+            return False, str(e)
+        finally:
+            conn.close()
+    
     def save_screenshot(self, uploaded_file, trade_id):
         """保存上传的截图文件"""
         try:
@@ -604,6 +665,79 @@ class TradeDataEngine:
             df = pd.DataFrame()
         conn.close()
         return df
+    
+    # ===========================
+    #  ⚙️ 系统配置管理 (Bug Fix)
+    # ===========================
+    def get_setting(self, key, default_value=""):
+        """获取系统配置"""
+        conn = sqlite3.connect(self.db_path)
+        try:
+            c = conn.cursor()
+            c.execute("SELECT value FROM system_settings WHERE key = ?", (key,))
+            result = c.fetchone()
+            return result[0] if result else default_value
+        except:
+            return default_value
+        finally:
+            conn.close()
+    
+    def set_setting(self, key, value):
+        """保存系统配置"""
+        conn = sqlite3.connect(self.db_path)
+        try:
+            c = conn.cursor()
+            c.execute("INSERT OR REPLACE INTO system_settings (key, value) VALUES (?, ?)", (key, str(value)))
+            conn.commit()
+            return True
+        except Exception as e:
+            print(f"Save setting error: {e}")
+            return False
+        finally:
+            conn.close()
+    
+    # ===========================
+    #  📚 策略库管理 (v3.1 新增)
+    # ===========================
+    def get_all_strategies(self):
+        """获取所有策略及其定义"""
+        conn = sqlite3.connect(self.db_path)
+        try:
+            df = pd.read_sql_query("SELECT * FROM strategies", conn)
+            # 转为字典 {name: description}
+            if not df.empty:
+                return dict(zip(df['name'], df['description']))
+            return {}
+        except:
+            return {}
+        finally:
+            conn.close()
+    
+    def save_strategy(self, name, description):
+        """新增或更新策略"""
+        conn = sqlite3.connect(self.db_path)
+        try:
+            c = conn.cursor()
+            c.execute("INSERT OR REPLACE INTO strategies (name, description) VALUES (?, ?)", (name, description))
+            conn.commit()
+            return True, "✅ 策略已保存"
+        except Exception as e:
+            return False, str(e)
+        finally:
+            conn.close()
+    
+    def delete_strategy(self, name):
+        """删除策略"""
+        conn = sqlite3.connect(self.db_path)
+        try:
+            c = conn.cursor()
+            c.execute("DELETE FROM strategies WHERE name = ?", (name,))
+            conn.commit()
+            return True, "🗑️ 策略已删除"
+        except Exception as e:
+            return False, str(e)
+        finally:
+            conn.close()
     
     # ===========================
     #  🎯 v3.0 深度复盘数据更新 (新增)

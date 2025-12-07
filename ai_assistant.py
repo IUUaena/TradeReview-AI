@@ -1,91 +1,146 @@
 from openai import OpenAI
 import pandas as pd
 import json
+import base64
+import mimetypes
+import os
 
 def get_client(api_key, base_url):
     return OpenAI(api_key=api_key, base_url=base_url)
 
-def audit_single_trade(api_key, base_url, trade_data, system_manifesto=""):
+# 新增：图片转 Base64 辅助函数
+def encode_image(image_path):
+    """将图片文件编码为 Base64 字符串"""
+    if not image_path or not os.path.exists(image_path):
+        return None
+    try:
+        with open(image_path, "rb") as image_file:
+            return base64.b64encode(image_file.read()).decode('utf-8')
+    except:
+        return None
+
+def call_api_with_retry(client, api_params, max_retries=2):
+    """带重试的 API 调用"""
+    for attempt in range(max_retries + 1):
+        try:
+            return client.chat.completions.create(**api_params)
+        except Exception as e:
+            if attempt < max_retries:
+                print(f"⚠️ API 调用失败，重试中 ({attempt + 1}/{max_retries})...")
+                import time
+                time.sleep(1)
+            else:
+                raise e
+
+def audit_single_trade(api_key, base_url, trade_data, system_manifesto="", strategy_rules="", image_path=None, model_name="deepseek-chat"):
     """
-    v3.0 单笔交易审计：结合心理、评分、执行质量进行深度点评
+    v3.6.1 修复版：移除 URL 自动修改逻辑，完全信任前端配置
     """
     try:
+        # 直接使用传入的 base_url，不乱改
         client = get_client(api_key, base_url)
         
-        # 1. 构建数据快照
+        # 1. 准备文本上下文 (Context)
         t = trade_data
         pnl_emoji = "💰 盈利" if t.get('net_pnl', 0) > 0 else "💸 亏损"
         
-        # 核心：构建一个"诚实的数据包"
-        context = f"""
+        context_text = f"""
         【交易档案】
         - 标的/方向: {t.get('symbol', 'N/A')} ({t.get('direction', 'N/A')})
         - 结果: {pnl_emoji} ${t.get('net_pnl', 0):.2f}
-        - 持仓时间: {t.get('duration_str', 'N/A')}
         
-        【自我评估 (交易员自述)】
-        - 心理状态: {t.get('mental_state', '未记录')}
-        - 机会评分: {t.get('setup_rating', 'N/A')}/10
-        - 执行定性: {t.get('process_tag', '未记录')}
-        - 犯错标签: {t.get('mistake_tags', '无')}
-        - 预期盈亏比: {t.get('rr_ratio', 0)}
-        - 策略依据: {t.get('strategy', '未填写')}
-        - 复盘笔记: "{t.get('notes', '未填写')}"
+        【自我评估】
+        - 策略: {t.get('strategy', '未填写')}
+        - 笔记: "{t.get('notes', '未填写')}"
+        - 心理: {t.get('mental_state', '-')}
+        - 执行: {t.get('process_tag', '-')}
         """
         
-        # 2. 系统宪法 (如果有)
-        manifesto_prompt = ""
-        if system_manifesto:
-            manifesto_prompt = f"""
-            【交易员的系统宪法 (Rulebook)】
-            这是该交易员誓死遵守的规则，请据此审查他是否违规：
-            "{system_manifesto}"
-            """
+        # 2. 构建 System Prompt
+        manifesto_part = f"【系统宪法】: {system_manifesto}" if system_manifesto else ""
+        strategy_part = f"【策略定义】: {strategy_rules}" if strategy_rules else ""
         
-        # 3. 审计师人设 (Auditor Persona)
         system_prompt = f"""
-        你是一名铁面无私的【交易审计师】。你的任务不是预测市场，而是审计"执行一致性"。
+        你是一名拥有鹰眼的【交易审计师】。你的核心能力是结合【K线图表】和【交易员笔记】进行交叉验证。
         
-        {manifesto_prompt}
-        请根据交易员的【自我评估】和【交易结果】，进行逻辑审计。
+        {manifesto_part}
+        {strategy_part}
         
-        ### 审计逻辑：
-        1. **过程 vs 结果**：
-           - 如果他标记 "Bad Process" 但赚钱了，请严厉警告这是"有毒的利润"。
-           - 如果他标记 "Good Process" 但亏钱了，请给予肯定和鼓励，这是系统的成本。
-           - 如果心理状态是 "FOMO/Tilt" 且亏损，请无情地指出这是情绪的代价。
+        请执行以下审计：
+        1. **图文一致性**：交易员说的"突破/回调"在图表上真的存在吗？(如果看不到图，请忽略此条)
+        2. **技术面诊断**：指出入场点是否过早/过晚？
+        3. **情绪验证**：图表上是否显示出了追涨杀跌的痕迹？
         
-        2. **知行合一检查**：
-           - 检查他的复盘笔记和策略是否矛盾。
-           - 检查他的预期盈亏比是否合理。
-           
-        ### 输出格式：
-        **👮 审计结论**： (一句话定性，如"标准的纪律性亏损"或"危险的运气单")
-        
-        **📉 关键漏洞**： (指出1-2个具体问题)
-        
-        **💡 改进建议**： (结合他的系统宪法给出建议)
+        注意：如果无法查看图片，请仅基于文本进行逻辑审计。
         """
         
-        # 4. 发送请求
-        response = client.chat.completions.create(
-            model="deepseek-chat", # 推荐 DeepSeek-V3
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"请审计这笔交易：\n{context}"}
-            ],
-            temperature=0.3, # 审计需要严谨，低随机性
-            timeout=45
-        )
+        messages = [{"role": "system", "content": system_prompt}]
         
+        # --- 3. 智能判断：该模型是否支持看图？ ---
+        # 只有这些模型才发送图片数据
+        support_vision_models = ["gpt-4o", "gemini", "claude", "vision"]
+        can_see_image = any(m in model_name.lower() for m in support_vision_models)
+        
+        # 特殊排除：DeepSeek 即使名字里没写 text，目前也不支持图片
+        if "deepseek" in model_name.lower():
+            can_see_image = False
+        
+        base64_image = encode_image(image_path)
+        
+        if base64_image and can_see_image:
+            # === 视觉模式 (Vision Mode) ===
+            image_ext = os.path.splitext(image_path)[1].lower() if image_path else '.jpeg'
+            mime_type = mimetypes.guess_type(image_path)[0] if image_path else 'image/jpeg'
+            if not mime_type:
+                # 根据扩展名判断
+                if image_ext in ['.png']:
+                    mime_type = 'image/png'
+                elif image_ext in ['.jpg', '.jpeg']:
+                    mime_type = 'image/jpeg'
+                elif image_ext in ['.gif']:
+                    mime_type = 'image/gif'
+                else:
+                    mime_type = 'image/jpeg'  # 默认
+            
+            user_content = [
+                {"type": "text", "text": f"这是这笔交易的详细记录和K线截图，请审计：\n{context_text}"},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:{mime_type};base64,{base64_image}",
+                        "detail": "high"
+                    }
+                }
+            ]
+            print(f"👁️ 正在发送视觉请求 (Model: {model_name})...")
+        else:
+            # === 纯文本模式 (Text Mode) ===
+            # DeepSeek 或无图时走这里
+            user_content = f"请审计这笔交易 (截图不可用或模型不支持)：\n{context_text}"
+            print(f"📝 正在发送纯文本请求 (Model: {model_name})...")
+        
+        messages.append({"role": "user", "content": user_content})
+        
+        # 4. 发送请求 (带重试)
+        api_params = {
+            "model": model_name,
+            "messages": messages,
+            "timeout": 90
+        }
+        
+        # DeepSeek Reasoner 不加 temperature
+        if "reasoner" not in model_name.lower():
+            api_params["temperature"] = 0.3
+        
+        response = call_api_with_retry(client, api_params)
         return response.choices[0].message.content
     
     except Exception as e:
-        return f"审计失败: {str(e)}"
+        return f"审计失败: {str(e)} (检查建议：1. Google URL是否以 /openai/ 结尾？ 2. DeepSeek 是否误传了图片？)"
 
-def generate_batch_review_v3(api_key, base_url, trades_df, system_manifesto="", report_type="最近30笔"):
+def generate_batch_review_v3(api_key, base_url, trades_df, system_manifesto="", report_type="最近30笔", model_name="deepseek-chat"):
     """
-    v3.0 批量诊断：统计"知行合一率"，寻找亏损模式
+    v3.5 批量诊断：统计"知行合一率"，寻找亏损模式（支持 reasoner 模型）
     """
     try:
         if trades_df.empty:
@@ -137,15 +192,21 @@ def generate_batch_review_v3(api_key, base_url, trades_df, system_manifesto="", 
         请用严厉、专业、一针见血的语气。
         """
         
-        response = client.chat.completions.create(
-            model="deepseek-chat",
-            messages=[
+        # v3.5: 支持 reasoner 模型
+        api_params = {
+            "model": model_name,
+            "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"交易流水：\n{trades_text}"}
             ],
-            temperature=0.5,
-            timeout=60
-        )
+            "timeout": 120  # 推理模型可能较慢，增加超时时间
+        }
+        
+        # ⚠️ 针对 deepseek-reasoner 的特殊处理：不支持 temperature 参数
+        if "reasoner" not in model_name.lower():
+            api_params["temperature"] = 0.5
+        
+        response = client.chat.completions.create(**api_params)
         
         return response.choices[0].message.content
     
@@ -283,6 +344,96 @@ def generate_batch_review(api_key, base_url, trades_df, report_type="最近30笔
         )
         
         return response.choices[0].message.content
-    
     except Exception as e:
-        return f"AI 分析生成失败: {str(e)}"
+        return f"批量分析失败: {str(e)}"
+
+def review_potential_trade(api_key, base_url, plan_data, system_manifesto, model_name="deepseek-chat"):
+    """
+    v3.5 事前风控：审查潜在交易计划（支持 reasoner 模型）
+    """
+    try:
+        client = get_client(api_key, base_url)
+        
+        # 1. 计算盈亏比和风险
+        entry = float(plan_data['entry'])
+        sl = float(plan_data['sl'])
+        tp = float(plan_data['tp'])
+        risk_money = float(plan_data['risk_money'])
+        
+        # 自动识别方向
+        direction = "做多 (Long)" if entry > sl else "做空 (Short)"
+        
+        # 计算潜在亏损幅度和盈亏比
+        risk_per_share = abs(entry - sl)
+        reward_per_share = abs(tp - entry)
+        
+        if risk_per_share == 0: 
+            return "❌ 止损价不能等于开仓价"
+        
+        rr_ratio = reward_per_share / risk_per_share
+        
+        # 建议仓位 (以损定仓公式)
+        # 数量 = 风险金额 / 单股止损差价
+        qty = risk_money / risk_per_share
+        position_value = qty * entry
+        
+        # 计算止损距离百分比
+        if entry > 0:
+            stop_distance_pct = abs(entry - sl) / entry * 100
+        else:
+            stop_distance_pct = 0
+        
+        # 2. 构建审查 prompt
+        context = f"""
+        【拟定交易计划】
+        - 方向: {direction}
+        - 标的: {plan_data['symbol']}
+        - 入场价: {entry}
+        - 止损价: {sl} (距离 {stop_distance_pct:.2f}%)
+        - 止盈价: {tp}
+        - 计划风险金额: ${risk_money} (以损定仓)
+        - 盈亏比 (R:R): {rr_ratio:.2f}
+        - 建议开仓数量: {qty:.4f} 个
+        - 建议持仓价值: ${position_value:.2f}
+        """
+        
+        system_prompt = f"""
+        你是一名严格的【交易风控官】。请审查以下"拟定交易计划"。
+        
+        【系统宪法 (必须遵守的铁律)】:
+        "{system_manifesto}"
+        
+        请进行事前拦截检查：
+        1. **盈亏比检查**：R:R 是否符合宪法要求？（通常要求 > 2.0 或 3.0）
+        2. **止损合理性**：止损幅度是否过窄（容易被打）或过宽？
+        3. **风险一致性**：这笔交易是否符合顺势/逆势的逻辑（如果宪法里提到了）？
+        
+        ### 输出格式：
+        **🛑 审查结果**：(通过 / 拒绝 / 需谨慎)
+        
+        **⚖️ 盈亏比评价**：(如 "R:R 1.5 太低，建议放弃")
+        
+        **🛡️ 仓位建议**：(确认计算出的仓位是否合理)
+        
+        **💡 导师建议**：(一句话点评)
+        """
+        
+        # v3.5: 支持 reasoner 模型
+        api_params = {
+            "model": model_name,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": f"请审查这笔计划：\n{context}"}
+            ],
+            "timeout": 60  # 推理模型可能较慢，增加超时时间
+        }
+        
+        # ⚠️ 针对 deepseek-reasoner 的特殊处理：不支持 temperature 参数
+        if "reasoner" not in model_name.lower():
+            api_params["temperature"] = 0.3
+        
+        response = client.chat.completions.create(**api_params)
+        
+        return response.choices[0].message.content
+    except Exception as e:
+        return f"风控审查失败: {str(e)}"
