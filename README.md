@@ -1,2 +1,2 @@
-# tradingpost
+# TradeReview-AI
 
