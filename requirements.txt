@@ -1,0 +1,9 @@
+streamlit
+ccxt
+pandas
+openpyxl
+plotly
+openai
+python-docx
+chromadb
+pysqlite3-binary ; sys_platform == 'linux'
