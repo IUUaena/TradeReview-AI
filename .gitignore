@@ -7,6 +7,7 @@
 trade_review.db
 trading_data.db
 trading_system.db
+market_data.db
 
 # 忽略导出的报告（个人交易数据）
 TradeReport_*.docx
