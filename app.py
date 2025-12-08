@@ -1560,6 +1560,174 @@ if selected_key:
                                 )
                                 
                                 st.plotly_chart(fig, use_container_width=True)
+                                
+                                # =================================================
+                                # 🎥 沉浸式 K 线回放 (Cinema Mode v3.3 - Init Fix)
+                                # =================================================
+                                st.markdown("---")
+                                with st.expander("🎥 沉浸式时光机 (K-Line Replay)", expanded=True):
+                                    # --- 0. 状态隔离核心 (Namespace) ---
+                                    tid = trade['round_id']
+                                    k_active = f"rp_active_{tid}"  # 播放状态
+                                    k_idx = f"rp_idx_{tid}"        # 数据指针
+                                    k_slider = f"rp_slider_{tid}"  # 控件状态
+                                    k_speed = f"rp_speed_{tid}"    # 速度设置
+                                    
+                                    # 获取入场价格（用于计算盈亏）
+                                    entry_price = float(trade_row['price'])
+                                    
+                                    # 1. 准备数据
+                                    replay_full_df = chart_df.reset_index(drop=True)
+                                    total_frames = len(replay_full_df)
+                                    
+                                    if total_frames > 0:
+                                        # 2. 初始化与同步 (核心修复区域)
+                                        # ----------------------------------------------------
+                                        # A. 初始化播放状态
+                                        if k_active not in st.session_state:
+                                            st.session_state[k_active] = False
+                                        
+                                        # B. 初始化数据指针
+                                        if k_idx not in st.session_state:
+                                            # 智能定位：尝试定位到开仓前 20 根
+                                            default_start = 0
+                                            try:
+                                                start_match = replay_full_df[replay_full_df['timestamp'] >= trade['open_time']].index
+                                                if len(start_match) > 0:
+                                                    default_start = max(0, start_match[0] - 20)
+                                            except:
+                                                pass
+                                            st.session_state[k_idx] = default_start
+                                        
+                                        # C. [修复关键点] 独立初始化滑块 Key
+                                        # 无论 k_idx 是否已存在，都要确保 k_slider 存在
+                                        if k_slider not in st.session_state:
+                                            st.session_state[k_slider] = st.session_state[k_idx]
+                                        
+                                        # D. 强制同步 (Fix: StreamlitAPIException)
+                                        # 确保滑块位置与后台数据指针一致 (用于自动播放时的 UI 刷新)
+                                        if st.session_state[k_slider] != st.session_state[k_idx]:
+                                            st.session_state[k_slider] = st.session_state[k_idx]
+                                        # ----------------------------------------------------
+                                        
+                                        # 3. 播放器控制台
+                                        c_play, c_step, c_reset, c_speed, c_slider = st.columns([1, 1, 1, 1.5, 5])
+                                        
+                                        with c_play:
+                                            # 播放/暂停
+                                            if st.session_state[k_active]:
+                                                if st.button("⏸️ 暂停", key=f"btn_pause_{tid}", use_container_width=True):
+                                                    st.session_state[k_active] = False
+                                                    st.rerun()
+                                            else:
+                                                if st.button("▶️ 播放", key=f"btn_play_{tid}", use_container_width=True, type="primary"):
+                                                    st.session_state[k_active] = True
+                                                    st.rerun()
+                                        
+                                        with c_step:
+                                            # 单步
+                                            if st.button("⏩ 单步", key=f"btn_step_{tid}", use_container_width=True):
+                                                st.session_state[k_active] = False
+                                                if st.session_state[k_idx] < total_frames - 1:
+                                                    st.session_state[k_idx] += 1
+                                                    st.session_state[k_slider] = st.session_state[k_idx] # 同步
+                                                    st.rerun()
+                                        
+                                        with c_reset:
+                                            if st.button("⏹️ 重置", key=f"btn_reset_{tid}", use_container_width=True):
+                                                st.session_state[k_active] = False
+                                                try:
+                                                    start_match = replay_full_df[replay_full_df['timestamp'] >= trade['open_time']].index
+                                                    reset_val = max(0, start_match[0] - 20) if len(start_match) > 0 else 0
+                                                except:
+                                                    reset_val = 0
+                                                
+                                                st.session_state[k_idx] = reset_val
+                                                st.session_state[k_slider] = reset_val
+                                                st.rerun()
+                                                
+                                        with c_speed:
+                                            speed_map = {"0.5x": 0.5, "1.0x": 0.2, "2.0x": 0.1, "5.0x": 0.01}
+                                            sel_speed = st.selectbox("倍速", options=list(speed_map.keys()), index=2, label_visibility="collapsed", key=k_speed)
+                                            current_speed = speed_map[sel_speed]
+                                        
+                                        with c_slider:
+                                            def on_slider_change():
+                                                # 用户拖动 -> 更新 idx -> 暂停播放
+                                                st.session_state[k_idx] = st.session_state[k_slider]
+                                                st.session_state[k_active] = False
+                                                
+                                            st.slider(
+                                                "Timeline", 
+                                                min_value=0, max_value=total_frames - 1,
+                                                key=k_slider, # 绑定状态
+                                                on_change=on_slider_change,
+                                                label_visibility="collapsed"
+                                            )
+                                        
+                                        # 4. 渲染画面
+                                        curr_frame = max(5, st.session_state[k_idx] + 1)
+                                        current_view_df = replay_full_df.iloc[:curr_frame].copy()
+                                        last_bar = current_view_df.iloc[-1]
+                                        
+                                        # 数据计算
+                                        cur_price = last_bar['close']
+                                        cur_time_str = last_bar['datetime'].strftime('%m-%d %H:%M')
+                                        if "Long" in trade['direction']:
+                                            pnl_pct = (cur_price - plot_entry_price) / plot_entry_price * 100
+                                        else:
+                                            pnl_pct = (plot_entry_price - cur_price) / plot_entry_price * 100
+                                        
+                                        # HUD
+                                        pnl_color = "#4CAF50" if pnl_pct > 0 else "#FF5252"
+                                        bg_color = "rgba(76, 175, 80, 0.1)" if pnl_pct > 0 else "rgba(255, 82, 82, 0.1)"
+                                        
+                                        h1, h2, h3 = st.columns([2, 2, 4])
+                                        h1.metric("⏱️ 回放时间", cur_time_str)
+                                        h2.metric("💲 现价", f"{cur_price:.4f}")
+                                        h3.markdown(f"""
+                                        <div style="background:{bg_color}; border:1px solid {pnl_color}; border-radius:8px; padding:2px 10px; text-align:center;">
+                                            <span style="color:#888; font-size:12px;">实时 ROI</span><br>
+                                            <span style="color:{pnl_color}; font-size:20px; font-weight:bold;">{pnl_pct:+.2f}%</span>
+                                        </div>
+                                        """, unsafe_allow_html=True)
+                                        
+                                        # 绘图
+                                        import plotly.graph_objects as go
+                                        fig_rep = go.Figure()
+                                        fig_rep.add_trace(go.Candlestick(
+                                            x=current_view_df['datetime'],
+                                            open=current_view_df['open'], high=current_view_df['high'],
+                                            low=current_view_df['low'], close=current_view_df['close'],
+                                            name='Price'
+                                        ))
+                                        fig_rep.add_hline(y=entry_price, line_dash="dash", line_color="yellow")
+                                        
+                                        y_min = replay_full_df['low'].min()
+                                        y_max = replay_full_df['high'].max()
+                                        pad = (y_max - y_min) * 0.1
+                                        
+                                        fig_rep.update_layout(
+                                            height=450, margin=dict(t=10, b=10, l=10, r=10),
+                                            plot_bgcolor='#1E1E1E', paper_bgcolor='#1E1E1E',
+                                            font=dict(color='#E0E0E0'), xaxis_rangeslider_visible=False,
+                                            showlegend=False,
+                                            yaxis=dict(range=[y_min - pad, y_max + pad], side='right', gridcolor='#333'),
+                                            xaxis=dict(showgrid=False)
+                                        )
+                                        st.plotly_chart(fig_rep, use_container_width=True)
+                                        
+                                        # 5. 自动播放引擎
+                                        if st.session_state[k_active]:
+                                            if st.session_state[k_idx] < total_frames - 1:
+                                                time.sleep(current_speed)
+                                                st.session_state[k_idx] += 1
+                                                # 注意：这里不再直接修改 widget key (k_slider)，
+                                                # 而是依赖下一轮循环顶部的 "强制同步" 逻辑 (D部分) 来处理
+                                                st.rerun()
+                                            else:
+                                                st.session_state[k_active] = False
+                                        
                             # =================================================
                     
                     st.markdown("---")
