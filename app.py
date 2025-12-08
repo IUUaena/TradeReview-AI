@@ -1888,6 +1888,176 @@ if selected_key:
                                         st.plotly_chart(fig_whatif, use_container_width=True)
                             
                             # =================================================
+                            # 📉 功能设想三：上帝视角 (Trend Context - Vegas Style)
+                            # =================================================
+                            st.markdown("---")
+                            with st.expander("📉 上帝视角 (Vegas 隧道趋势分析)", expanded=False):
+                                st.caption("跳出 1分钟的噪音，利用 Vegas 隧道 (144/169/288/338) 识别大周期趋势。")
+                                
+                                # 1. 控制台
+                                col_tf, col_ma = st.columns([1, 3])
+                                with col_tf:
+                                    # 选择要看的大周期 (Vegas 在 1H/4H 效果最佳)
+                                    tf_map = {"1小时 (1H)": "1h", "4小时 (4H)": "4h", "日线 (1D)": "1d"}
+                                    sel_tf = st.selectbox("选择格局周期", options=list(tf_map.keys()), index=1)
+                                    resample_rule = tf_map[sel_tf]
+                                    
+                                with col_ma:
+                                    # 均线辅助
+                                    show_vegas = st.checkbox("显示 Vegas 隧道 (144/169 & 288/338)", value=True)
+
+                                # 2. 获取更宽范围的数据
+                                if 'market_engine' not in st.session_state:
+                                    st.session_state.market_engine = MarketDataEngine()
+                                me = st.session_state.market_engine
+                                
+                                # ============ 🔧 修复开始：动态计算回溯时间 ============
+                                # Vegas 隧道最大周期是 338，我们需要确保有足够的 K 线数量
+                                # 1H: 需要至少 338 小时 (约14天) -> 我们取 30 天
+                                # 4H: 需要至少 338*4 小时 (约56天) -> 我们取 120 天
+                                # 1D: 需要至少 338 天 -> 我们取 450 天
+                                
+                                lookback_map = {
+                                    "1h": 30,
+                                    "4h": 120, 
+                                    "1d": 450
+                                }
+                                # 获取对应周期的回溯天数，默认 30 天
+                                days_needed = lookback_map.get(resample_rule, 30)
+                                
+                                # 计算开始时间
+                                context_start = trade['open_time'] - (days_needed * 24 * 60 * 60 * 1000)
+                                context_end = trade['close_time'] + (5 * 24 * 60 * 60 * 1000)
+                                # =====================================================
+                                
+                                # 清洗 Symbol
+                                raw_symbol = trade['symbol']
+                                clean_symbol = raw_symbol.split(':')[0] 
+                                if "USDT" in clean_symbol and "/" not in clean_symbol:
+                                    clean_symbol = clean_symbol.replace("USDT", "/USDT")
+                                    
+                                with st.spinner(f"正在构建 {sel_tf} Vegas 隧道 (回溯 {days_needed} 天数据)..."):
+                                    raw_context_df = me.get_klines_df(clean_symbol, context_start, context_end)
+                                    
+                                    # 检查数据是否真的足够 (可能你的本地库只同步了 30 天)
+                                    if raw_context_df.empty:
+                                        st.warning("⚠️ 本地数据为空，请先同步。")
+                                    else:
+                                        # 3. 核心算法：重采样
+                                        agg_dict = {
+                                            'open': 'first', 'high': 'max',
+                                            'low': 'min', 'close': 'last', 'volume': 'sum'
+                                        }
+                                        if 'datetime' in raw_context_df.columns:
+                                            raw_context_df.set_index('datetime', inplace=True)
+                                            
+                                        htf_df = raw_context_df.resample(resample_rule).agg(agg_dict).dropna()
+                                        
+                                        # 4. 计算 Vegas 均线组
+                                        if show_vegas and len(htf_df) > 338:
+                                            import pandas_ta as ta
+                                            # 短期隧道 (绿)
+                                            htf_df['EMA144'] = ta.ema(htf_df['close'], length=144)
+                                            htf_df['EMA169'] = ta.ema(htf_df['close'], length=169)
+                                            # 长期隧道 (红)
+                                            htf_df['EMA288'] = ta.ema(htf_df['close'], length=288)
+                                            htf_df['EMA338'] = ta.ema(htf_df['close'], length=338)
+                                        
+                                        # 5. 绘图
+                                        import plotly.graph_objects as go
+                                        fig_trend = go.Figure()
+                                        
+                                        # A. K线
+                                        fig_trend.add_trace(go.Candlestick(
+                                            x=htf_df.index,
+                                            open=htf_df['open'], high=htf_df['high'],
+                                            low=htf_df['low'], close=htf_df['close'],
+                                            name=f'{sel_tf} K线'
+                                        ))
+                                        
+                                        # B. Vegas 隧道
+                                        if show_vegas:
+                                            # 定义颜色：短期用绿色系，长期用红色系
+                                            vegas_colors = {
+                                                'EMA144': '#00E676', 'EMA169': '#00E676', # 隧道1
+                                                'EMA288': '#FF5252', 'EMA338': '#FF5252'  # 隧道2
+                                            }
+                                            
+                                            for ma, color in vegas_colors.items():
+                                                if ma in htf_df.columns:
+                                                    # 这里的 line_width 设细一点，突出"通道"的感觉
+                                                    fig_trend.add_trace(go.Scatter(
+                                                        x=htf_df.index, y=htf_df[ma],
+                                                        mode='lines', line=dict(color=color, width=1),
+                                                        name=ma, hoverinfo='skip' # 鼠标悬停不显示太杂乱
+                                                    ))
+                                            
+                                            # (可选) 在两条线之间填充颜色，形成真正的"隧道"视觉效果
+                                            # Plotly 填充需要一点技巧，这里为了性能暂只画线，视觉上已经足够清晰
+
+                                        # C. 标记交易
+                                        my_open_time = pd.to_datetime(trade['open_time'], unit='ms')
+                                        my_close_time = pd.to_datetime(trade['close_time'], unit='ms')
+                                        
+                                        # 在重采样后的数据中标记交易位置
+                                        trade_mask_htf = (htf_df.index >= my_open_time) & (htf_df.index <= my_close_time)
+                                        trade_snippet_htf = htf_df[trade_mask_htf]
+                                        
+                                        if not trade_snippet_htf.empty:
+                                            box_top = trade_snippet_htf['high'].max()
+                                            box_bottom = trade_snippet_htf['low'].min()
+                                            h = box_top - box_bottom
+                                            
+                                            fig_trend.add_shape(
+                                                type="rect",
+                                                x0=my_open_time, y0=box_bottom - h*0.2,
+                                                x1=my_close_time, y1=box_top + h*0.2,
+                                                line=dict(color="yellow", width=2),
+                                                fillcolor="rgba(255, 255, 0, 0.3)",
+                                            )
+                                            fig_trend.add_annotation(
+                                                x=my_open_time, y=box_top + h*0.2,
+                                                text="👈 你的操作", showarrow=True, arrowhead=1, ax=0, ay=-30,
+                                                font=dict(color="yellow")
+                                            )
+
+                                        fig_trend.update_layout(
+                                            height=500, margin=dict(t=30, b=10, l=10, r=10),
+                                            plot_bgcolor='#1E1E1E', paper_bgcolor='#1E1E1E',
+                                            font=dict(color='#E0E0E0'), title=f"{clean_symbol} - {sel_tf} Vegas 趋势图",
+                                            xaxis_rangeslider_visible=False,
+                                            yaxis=dict(gridcolor='#333'), xaxis=dict(showgrid=False)
+                                        )
+                                        st.plotly_chart(fig_trend, use_container_width=True)
+                                        
+                                        # 6. AI 趋势简评 (Vegas 逻辑)
+                                        if show_vegas and 'EMA169' in htf_df.columns:
+                                            try:
+                                                # 获取开仓时刻的数据
+                                                idx = htf_df.index.get_indexer([my_open_time], method='nearest')[0]
+                                                bar = htf_df.iloc[idx]
+                                                price = bar['close']
+                                                tunnel1 = bar['EMA169'] # 短期隧道参考
+                                                tunnel2 = bar['EMA288'] # 长期隧道参考
+                                                
+                                                # 简单的多空判断逻辑
+                                                is_bull = price > tunnel1
+                                                # 强趋势判断：如果在 288 之上，是强多头
+                                                is_strong_bull = price > tunnel2
+                                                
+                                                trend_str = "🟢 多头趋势 (在 169 之上)" if is_bull else "🔴 空头趋势 (在 169 之下)"
+                                                if is_strong_bull and is_bull: trend_str += " | 🔥 强趋势 (在 288 之上)"
+                                                
+                                                # 顺势/逆势
+                                                my_dir = trade['direction']
+                                                is_with_trend = (is_bull and "Long" in my_dir) or (not is_bull and "Short" in my_dir)
+                                                action_emoji = "✅ 顺势" if is_with_trend else "⚠️ 逆势"
+                                                
+                                                st.info(f"**Vegas 诊断 ({sel_tf})**: 当时处于 {trend_str}。你的操作是 **{my_dir}** -> 判定为 **{action_emoji}**。")
+                                            except:
+                                                pass
+                            
+                            # =================================================
                     
                     st.markdown("---")
                     
