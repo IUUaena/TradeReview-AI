@@ -1398,6 +1398,15 @@ if selected_key:
                             
                             me = st.session_state.market_engine
                             
+                            # =========== 🔧 修复开始：清洗币种名称 ===========
+                            # 你的交易记录里是 "BNB/USDT:USDT"，但仓库里存的是 "BNB/USDT"
+                            # 所以查询前必须把后缀去掉，不然查不到数据
+                            raw_symbol = trade['symbol']
+                            clean_symbol = raw_symbol.split(':')[0] 
+                            if "USDT" in clean_symbol and "/" not in clean_symbol:
+                                clean_symbol = clean_symbol.replace("USDT", "/USDT")
+                            # ===============================================
+                            
                             entry_price = float(trade_row['price'])
                             # 获取仓位大小
                             amount = float(trade_row.get('amount', 0) or trade.get('amount', 0) or 0)
@@ -1411,8 +1420,9 @@ if selected_key:
                                     query_start = trade['open_time'] - (200 * 60 * 1000) 
                                     query_end = trade['close_time']
                                     
+                                    # 👇 注意：这里改成了传入 clean_symbol
                                     candles = me.get_klines_df(
-                                        trade['symbol'], query_start, query_end
+                                        clean_symbol, query_start, query_end
                                     )
                                     
                                     if not candles.empty:
@@ -1443,7 +1453,8 @@ if selected_key:
                                                 time.sleep(0.5)
                                                 st.rerun()
                                     else:
-                                        st.error(f"❌ 本地仓库没有 {trade['symbol']} 的数据。请先运行 sync_market_data.py 进行同步！")
+                                        # 错误提示也优化一下，告诉用户你要查的是谁
+                                        st.error(f"❌ 本地仓库没有 {clean_symbol} 的数据。请点击侧边栏的【一键同步 K 线】！")
                         
                         # === 展示数据 (v7.0 增强版) ===
                         # 尝试获取实时计算的 v7 stats
