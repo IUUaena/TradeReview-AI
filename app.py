@@ -1729,6 +1729,165 @@ if selected_key:
                                                 st.session_state[k_active] = False
                                         
                             # =================================================
+                            
+                            # =================================================
+                            # 🔮 功能设想二：卖飞模拟器 (What-If Analysis)
+                            # =================================================
+                            st.markdown("---")
+                            with st.expander("🔮 卖飞模拟器 (上帝视角验收)", expanded=False):
+                                st.caption("如果不平仓，死拿到底会怎样？让数据告诉你真相。")
+                                
+                                # 获取必要的变量（确保在作用域内）
+                                whatif_entry_price = float(trade_row['price'])
+                                whatif_amount = float(trade_row.get('amount', 0) or trade.get('amount', 0) or 0)
+                                
+                                # 1. 选择"后悔时间窗口"
+                                col_time, col_res = st.columns([1, 3])
+                                with col_time:
+                                    hold_hours = st.selectbox(
+                                        "假设多拿多久？", 
+                                        options=[1, 4, 12, 24, 48], 
+                                        format_func=lambda x: f"+ {x} 小时",
+                                        index=1 # 默认看 4 小时
+                                    )
+                                
+                                # 2. 获取平仓后的数据 (未来数据)
+                                # 注意：需要重新查询数据库，获取 close_time 之后的数据
+                                if 'market_engine' not in st.session_state:
+                                    st.session_state.market_engine = MarketDataEngine()
+                                me = st.session_state.market_engine
+                                
+                                # 计算未来时间段
+                                future_start = trade['close_time']
+                                future_end = future_start + (hold_hours * 60 * 60 * 1000)
+                                
+                                # 清洗 Symbol (防止带 :USDT 后缀查不到)
+                                raw_symbol = trade['symbol']
+                                clean_symbol = raw_symbol.split(':')[0] 
+                                if "USDT" in clean_symbol and "/" not in clean_symbol:
+                                    clean_symbol = clean_symbol.replace("USDT", "/USDT")
+                                
+                                with st.spinner("🔮 正在推演平行宇宙..."):
+                                    future_df = me.get_klines_df(clean_symbol, future_start, future_end)
+                                    
+                                    if future_df.empty:
+                                        st.warning("⚠️ 本地仓库没有这段未来的数据。可能是这笔交易刚发生不久，或者你需要重新【一键同步 K 线】。")
+                                    else:
+                                        # 3. 计算"如果多拿"的结果
+                                        # 获取实际平仓价（持仓期间最后一根 K 线的收盘价）
+                                        if not chart_df.empty:
+                                            exit_price = float(chart_df.iloc[-1]['close'])
+                                        else:
+                                            exit_price = float(trade_row.get('price', 0))
+                                            if exit_price == 0: 
+                                                exit_price = future_df.iloc[0]['open'] # 容错
+                                        
+                                        # 获取这段时间的最高/最低价
+                                        future_high = future_df['high'].max()
+                                        future_low = future_df['low'].min()
+                                        future_close = future_df.iloc[-1]['close']
+                                        
+                                        # 计算潜在最大利润 (Perfect Play) 和 潜在最大回撤 (Worst Pain)
+                                        if "Long" in trade['direction']:
+                                            # 做多
+                                            potential_best = future_high
+                                            potential_worst = future_low
+                                            actual_diff = exit_price - whatif_entry_price
+                                            best_diff = potential_best - whatif_entry_price
+                                            held_diff = future_close - whatif_entry_price
+                                            
+                                            # 卖飞了吗？(如果最高价 > 平仓价 1% 以上)
+                                            is_sold_early = potential_best > (exit_price * 1.01)
+                                            # 逃顶了吗？(如果后续收盘价 < 平仓价)
+                                            is_good_exit = future_close < exit_price
+                                            
+                                        else:
+                                            # 做空
+                                            potential_best = future_low
+                                            potential_worst = future_high
+                                            actual_diff = whatif_entry_price - exit_price
+                                            best_diff = whatif_entry_price - potential_best
+                                            held_diff = whatif_entry_price - future_close
+                                            
+                                            is_sold_early = potential_best < (exit_price * 0.99)
+                                            is_good_exit = future_close > exit_price
+                                        
+                                        # 4. 生成 AI 判词
+                                        with col_res:
+                                            if is_good_exit and not is_sold_early:
+                                                st.success(f"🏆 **神级逃顶！**\n\n在你走后，价格向不利方向运行。如果你死拿 {hold_hours} 小时，你的利润将**缩水 ${(actual_diff - held_diff) * whatif_amount:.2f}**。这一跑，跑得漂亮！")
+                                            elif is_sold_early:
+                                                missed_money = (best_diff - actual_diff) * whatif_amount
+                                                st.error(f"🍖 **严重卖飞！**\n\n在你走后，行情继续爆发。如果你能多拿一会儿，最高可以**多赚 ${missed_money:.2f}**！\n\n(最高价触及 {potential_best:.4f})")
+                                            else:
+                                                st.info(f"😐 **平平无奇**\n\n在你走后 {hold_hours} 小时内，价格仅仅是横盘震荡，没有太大的惊喜或惊吓。平仓没毛病。")
+                                        
+                                        # 5. 可视化对比图
+                                        # 画出：你的持仓段 (实线) + 未来段 (虚线)
+                                        import plotly.graph_objects as go
+                                        
+                                        # 合并数据用于画图 (为了连接，取持仓的最后几根 + 未来所有)
+                                        tail_count = min(20, len(chart_df)) # 确保不超过实际数据量
+                                        past_tail = chart_df.tail(tail_count) if tail_count > 0 else chart_df
+                                        
+                                        fig_whatif = go.Figure()
+                                        
+                                        # A. 过去 (实心蜡烛)
+                                        fig_whatif.add_trace(go.Candlestick(
+                                            x=past_tail['datetime'],
+                                            open=past_tail['open'], high=past_tail['high'],
+                                            low=past_tail['low'], close=past_tail['close'],
+                                            name='实际持仓',
+                                            increasing_line_color='#26A69A', decreasing_line_color='#EF5350'
+                                        ))
+                                        
+                                        # B. 未来 (空心/透明蜡烛，表示"平行宇宙")
+                                        fig_whatif.add_trace(go.Candlestick(
+                                            x=future_df['datetime'],
+                                            open=future_df['open'], high=future_df['high'],
+                                            low=future_df['low'], close=future_df['close'],
+                                            name=f'未来 {hold_hours}H',
+                                            increasing_line_color='rgba(38, 166, 154, 0.5)', 
+                                            decreasing_line_color='rgba(239, 83, 80, 0.5)'
+                                        ))
+                                        
+                                        # 标记你的平仓点 (Fix: 直接使用整数时间戳，避开 Pandas 2.0 运算错误)
+                                        fig_whatif.add_vline(
+                                            x=trade['close_time'],  # 👈 直接使用整数时间戳
+                                            line_dash="dash", 
+                                            line_color="yellow", 
+                                            annotation_text="你的平仓点"
+                                        )
+                                        
+                                        # 标记未来最高点 (如果是卖飞)
+                                        if is_sold_early:
+                                            # 找到最高点的时间
+                                            if "Long" in trade['direction']:
+                                                peak_time = future_df.loc[future_df['high'].idxmax()]['datetime']
+                                                peak_price = future_high
+                                            else:
+                                                peak_time = future_df.loc[future_df['low'].idxmin()]['datetime']
+                                                peak_price = potential_best
+                                                
+                                            fig_whatif.add_annotation(
+                                                x=peak_time, y=peak_price,
+                                                text="错过的顶", showarrow=True, arrowhead=1, arrowcolor="#FF5252"
+                                            )
+                                        
+                                        fig_whatif.update_layout(
+                                            height=400,
+                                            margin=dict(t=30, b=10, l=10, r=10),
+                                            plot_bgcolor='#1E1E1E', paper_bgcolor='#1E1E1E',
+                                            font=dict(color='#E0E0E0'),
+                                            xaxis_rangeslider_visible=False,
+                                            showlegend=True,
+                                            title=f"如果多拿 {hold_hours} 小时会发生什么？",
+                                            yaxis=dict(gridcolor='#333'),
+                                            xaxis=dict(showgrid=False)
+                                        )
+                                        st.plotly_chart(fig_whatif, use_container_width=True)
+                            
+                            # =================================================
                     
                     st.markdown("---")
                     
