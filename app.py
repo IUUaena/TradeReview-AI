@@ -1486,6 +1486,81 @@ if selected_key:
                             # ATR: 波动率风险
                             mae_atr = v7_stats.get('MAE_ATR', 0)
                             p3.metric("🌊 MAE (ATR)", f"{mae_atr:.1f} xATR", help="你抗了多少倍的波动率？>2.0 非常危险")
+                            
+                            # === 👇 新增：痛苦路径可视化 (v7.0 杀手锏) 👇 ===
+                            st.markdown("##### 🎢 痛苦路径回放 (Pain Path)")
+                            st.caption("红色点标记了你处于浮亏的时刻。灰色区域是 1倍 ATR 的正常波动范围。")
+                            
+                            chart_df = v7_stats.get('Charts')
+                            
+                            if chart_df is not None and not chart_df.empty:
+                                import plotly.graph_objects as go
+                                
+                                # 获取入场价格（从 trade_row 中获取）
+                                plot_entry_price = float(trade_row['price'])
+                                
+                                fig = go.Figure()
+                                
+                                # 1. 绘制 K 线
+                                fig.add_trace(go.Candlestick(
+                                    x=chart_df['datetime'],
+                                    open=chart_df['open'], high=chart_df['high'],
+                                    low=chart_df['low'], close=chart_df['close'],
+                                    name='Price'
+                                ))
+                                
+                                # 2. 绘制入场基准线
+                                fig.add_hline(y=plot_entry_price, line_dash="dash", line_color="white", annotation_text="Entry")
+                                
+                                # 3. 绘制 ATR 通道 (1x ATR Band)
+                                # 获取开仓时的 ATR
+                                first_row = chart_df.iloc[0]
+                                entry_atr = first_row.get('atr', 0)
+                                
+                                if pd.notna(entry_atr) and entry_atr > 0:
+                                    upper_band = plot_entry_price + entry_atr
+                                    lower_band = plot_entry_price - entry_atr
+                                    
+                                    # 绘制半透明的 ATR 通道
+                                    fig.add_hrect(
+                                        y0=lower_band, y1=upper_band, 
+                                        fillcolor="gray", opacity=0.15, line_width=0,
+                                        annotation_text="1x ATR (正常噪音)", annotation_position="top right"
+                                    )
+                                
+                                # 4. 标记"痛苦区域" (Pain Dots)
+                                # 筛选出浮亏的 K 线
+                                if "Long" in trade['direction']:
+                                    # 做多：收盘价 < 入场价
+                                    pain_mask = chart_df['close'] < plot_entry_price
+                                else:
+                                    # 做空：收盘价 > 入场价
+                                    pain_mask = chart_df['close'] > plot_entry_price
+                                    
+                                pain_df = chart_df[pain_mask]
+                                
+                                if not pain_df.empty:
+                                    fig.add_trace(go.Scatter(
+                                        x=pain_df['datetime'], y=pain_df['close'],
+                                        mode='markers', 
+                                        marker=dict(color='#FF5252', size=5, symbol='circle'),
+                                        name='痛苦时刻 (浮亏)'
+                                    ))
+                                
+                                # 5. 布局美化
+                                fig.update_layout(
+                                    height=450,
+                                    margin=dict(l=10, r=10, t=30, b=10),
+                                    plot_bgcolor='#1E1E1E', paper_bgcolor='#1E1E1E',
+                                    font=dict(color='#E0E0E0'),
+                                    xaxis_rangeslider_visible=False,
+                                    title=f"交易路径: {trade['symbol']} ({trade['direction']})",
+                                    xaxis=dict(showgrid=False),
+                                    yaxis=dict(showgrid=True, gridcolor='#333')
+                                )
+                                
+                                st.plotly_chart(fig, use_container_width=True)
+                            # =================================================
                     
                     st.markdown("---")
                     
