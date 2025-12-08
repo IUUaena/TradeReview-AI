@@ -185,12 +185,26 @@ def calc_price_action_stats(candles_df, trade_direction, entry_price, exit_price
     mae_r = max_loss_amt / safe_risk
     etd_r = (max_profit_amt - final_pnl_amt) / safe_risk
     
+    # v7.0 新增指标占位符（将在后续步骤中实现）
+    # MAD: 最大逆向持续时间（痛苦时长）
+    mad_minutes = 0  # TODO: 计算持仓期间浮亏的总时长
+    
+    # Efficiency: 交易效率（1.0 = 卖在最高点）
+    efficiency = 0.0  # TODO: 计算 final_pnl / max_profit
+    
+    # MAE_ATR: 以 ATR 为单位的最大浮亏
+    mae_atr = 0.0  # TODO: 使用 pandas_ta 计算 ATR，然后 mae_r / atr_multiple
+    
     return {
         "MAE": mae_r,
         "MFE": mfe_r,
         "ETD": etd_r,
         "High": period_high,
         "Low": period_low,
-        "Charts": period_df
+        "Charts": period_df,
+        # v7.0 新增指标
+        "MAD": mad_minutes,
+        "Efficiency": efficiency,
+        "MAE_ATR": mae_atr
     }
 

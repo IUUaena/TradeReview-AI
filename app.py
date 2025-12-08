@@ -3,10 +3,12 @@ import pandas as pd
 import numpy as np  # v5.0 新增：用于蒙特卡洛模拟
 import time
 import os
+import sqlite3  # v7.0 新增：用于 K 线数据同步
 import plotly.express as px
 from data_engine import TradeDataEngine
-from data_processor import process_trades_to_rounds # 引入核心逻辑
+from data_processor import process_trades_to_rounds, calc_price_action_stats # 引入核心逻辑
 from word_exporter import WordExporter
+from market_engine import MarketDataEngine
 from ai_assistant import generate_batch_review, generate_batch_review_v3, audit_single_trade, review_potential_trade, analyze_live_positions
 from risk_simulator import MonteCarloEngine  # v5.0 新增
 from memory_engine import MemoryEngine  # v5.0 RAG 记忆系统
@@ -278,6 +280,80 @@ with st.sidebar:
                     st.rerun()
                 else:
                     st.error(msg)
+        
+        # --- C2. 市场数据同步 (v7.0 新增) ---
+        with st.expander("📚 市场数据同步 (K线)"):
+            st.caption("下载 K 线到本地仓库，用于计算 ATR 和 痛苦时长(MAD)。")
+            
+            # 选项：同步天数
+            sync_days = st.selectbox("回溯时间", [365, 90, 30], format_func=lambda x: f"最近 {x} 天")
+            
+            if st.button("🚀 一键同步 K 线", use_container_width=True, type="primary"):
+                # 1. 初始化引擎
+                if 'market_engine' not in st.session_state:
+                    st.session_state.market_engine = MarketDataEngine()
+                me = st.session_state.market_engine
+                
+                # 2. 找出需要同步的币种 (从交易记录中提取)
+                status_box = st.status("正在分析交易记录...", expanded=True)
+                
+                try:
+                    # 连接数据库读取交易过的 symbol
+                    db_path = engine.db_path
+                    conn = sqlite3.connect(db_path)
+                    c = conn.cursor()
+                    c.execute("SELECT DISTINCT symbol FROM trades")
+                    rows = c.fetchall()
+                    conn.close()
+                    
+                    # 清洗币种列表
+                    target_coins = set()
+                    for r in rows:
+                        raw = r[0]
+                        # 移除可能的后缀 (如 :USDT) 并确保格式为 BASE/QUOTE
+                        clean = raw.split(':')[0]
+                        if "USDT" in clean and "/" not in clean:
+                            clean = clean.replace("USDT", "/USDT")
+                        target_coins.add(clean)
+                    
+                    # 加上 BTC 和 ETH
+                    target_coins.add("BTC/USDT")
+                    target_coins.add("ETH/USDT")
+                    
+                    target_list = sorted(list(target_coins))
+                    total_coins = len(target_list)
+                    
+                    status_box.write(f"📋 发现 {total_coins} 个关注币种，准备同步...")
+                    progress_bar = status_box.progress(0)
+                    
+                    # 3. 循环同步
+                    success_count = 0
+                    for i, symbol in enumerate(target_list):
+                        status_box.write(f"🔄 [{i+1}/{total_coins}] 正在同步 {symbol}...")
+                        
+                        # 定义回调更新进度
+                        def sync_callback(msg, pct):
+                            # 这里不更新主进度条，以免闪烁，只在后台打印或忽略
+                            pass
+                            
+                        ok, msg = me.sync_symbol_history(symbol, timeframe='1m', days=sync_days)
+                        
+                        if ok:
+                            success_count += 1
+                        else:
+                            st.toast(f"⚠️ {symbol} 同步失败: {msg}")
+                            
+                        # 更新总进度
+                        progress_bar.progress((i + 1) / total_coins)
+                    
+                    status_box.update(label=f"✅ 同步完成！成功更新 {success_count}/{total_coins} 个币种", state="complete", expanded=False)
+                    st.success("本地数据仓库已更新，现在可以进行极速复盘了！")
+                    time.sleep(2)
+                    st.rerun()
+                    
+                except Exception as e:
+                    status_box.update(label="❌ 发生错误", state="error")
+                    st.error(f"同步流程出错: {str(e)}")
         
         # --- C. Word 导出功能 (新增) ---
         # --- C. Word 导出功能 (v3.7 双模式) ---
@@ -1293,98 +1369,112 @@ if selected_key:
                     trade_row = raw_df[raw_df['id'] == trade['round_id']].iloc[0]
                     
                     # ==================================================================
-                    # 🔬 价格行为透视 (v5.0 R-Multiple 版)
+                    # 🔬 价格行为透视 (v7.0 Local Warehouse & ATR)
                     # ==================================================================
                     st.divider()
-                    st.markdown("### 🔬 Price Action (R-Multiple)")
+                    st.markdown("### 🔬 Price Action (v7.0 Pro)")
                     
                     has_pa_data = False
                     raw_mae = trade_row.get('mae')
                     if raw_mae is not None and str(raw_mae) != 'nan':
                         has_pa_data = True
                     
-                    # === 新增：风险金额输入框 ===
-                    # 默认值：可以设为你常用的金额，比如 100 U
                     pa_col_input, pa_col_btn = st.columns([2, 2])
                     with pa_col_input:
-                        # 尝试从笔记里提取风险？太复杂。直接让用户输，或者给个默认 100
                         risk_input = st.number_input("📉 单笔风险 ($ Risk)", value=100.0, step=10.0, key=f"risk_{trade['round_id']}")
                     
                     with pa_col_btn:
-                        st.markdown("<br>", unsafe_allow_html=True)  # 对齐
-                        btn_label = "🚀 计算 R 倍数数据" if has_pa_data else "🚀 还原过程 (R模式)"
+                        st.markdown("<br>", unsafe_allow_html=True)
+                        btn_label = "🚀 计算 v7.0 指标" if has_pa_data else "🚀 还原过程 (本地极速版)"
                         if st.button(btn_label, key=f"btn_pa_{trade['round_id']}"):
                             st.session_state[f"show_pa_{trade['round_id']}"] = True
                     
                     if st.session_state.get(f"show_pa_{trade['round_id']}", False) or has_pa_data:
                         if st.session_state.get(f"show_pa_{trade['round_id']}", False):
-                            with st.spinner("正在分页拉取 K 线并计算 R 值..."):
-                                entry_price = float(trade_row['price'])
-                                # 获取仓位大小，如果不存在则尝试从 trade 数据获取
-                                amount = float(trade_row.get('amount', 0) or trade.get('amount', 0) or 0)
-                                
-                                if entry_price <= 0:
-                                    st.error("❌ 入场价为 0，请先编辑交易。")
-                                    st.stop()
-                                
-                                if amount <= 0:
-                                    st.error("❌ 仓位数量为 0，无法计算 R 值。请先编辑交易补充仓位信息。")
-                                    st.stop()
-                                
-                                candles, msg = engine.get_candles_for_trade(
-                                    selected_key, selected_secret, 
-                                    trade['symbol'], trade['open_time'], trade['close_time']
-                                )
-                                
-                                if candles is not None:
-                                    exit_price = candles.iloc[-1]['close']
-                                    from data_processor import calc_price_action_stats
+                            # === v7.0 核心变更：使用 MarketDataEngine 从本地读取 ===
+                            # 初始化本地市场引擎 (单例模式，避免重复连接数据库)
+                            if 'market_engine' not in st.session_state:
+                                st.session_state.market_engine = MarketDataEngine()
+                            
+                            me = st.session_state.market_engine
+                            
+                            entry_price = float(trade_row['price'])
+                            # 获取仓位大小
+                            amount = float(trade_row.get('amount', 0) or trade.get('amount', 0) or 0)
+                            
+                            if entry_price <= 0 or amount <= 0:
+                                st.error("❌ 价格或数量无效，请先编辑交易。")
+                            else:
+                                with st.spinner("📦 正在从本地仓库调取数据..."):
+                                    # 关键：多取前 200 分钟数据，为了计算 ATR-14
+                                    # 如果本地没有数据，这里会返回空，提示用户去同步
+                                    query_start = trade['open_time'] - (200 * 60 * 1000) 
+                                    query_end = trade['close_time']
                                     
-                                    # === 传入 quantity 和 risk ===
-                                    stats = calc_price_action_stats(
-                                        candles, trade['direction'], entry_price, exit_price,
-                                        trade['open_time'], trade['close_time'],
-                                        amount, risk_input  # <--- 传入
+                                    candles = me.get_klines_df(
+                                        trade['symbol'], query_start, query_end
                                     )
                                     
-                                    if stats:
-                                        save_data = {
-                                            'mae': float(stats['MAE']),
-                                            'mfe': float(stats['MFE']),
-                                            'etd': float(stats['ETD'])
-                                        }
-                                        base_id = trade['round_id'].replace('_OPEN', '').replace('_CLOSE', '')
-                                        success, save_msg = engine.update_trade_extended(base_id, selected_key, save_data)
+                                    if not candles.empty:
+                                        # 调用 v7.0 的计算引擎
+                                        exit_price = candles.iloc[-1]['close']
+                                        stats = calc_price_action_stats(
+                                            candles, trade['direction'], entry_price, exit_price,
+                                            trade['open_time'], trade['close_time'], # 传入真实开平仓时间截取
+                                            amount, risk_input
+                                        )
                                         
-                                        if success:
-                                            st.success("✅ 计算并保存成功！")
-                                            st.session_state[f"show_pa_{trade['round_id']}"] = False 
-                                            time.sleep(1)
-                                            st.rerun()
-                                        else:
-                                            st.error(f"❌ 保存失败: {save_msg}")
+                                        if stats:
+                                            # 保存基本数据到数据库 (兼容旧字段)
+                                            save_data = {
+                                                'mae': float(stats['MAE']),
+                                                'mfe': float(stats['MFE']),
+                                                'etd': float(stats['ETD'])
+                                            }
+                                            base_id = trade['round_id'].replace('_OPEN', '').replace('_CLOSE', '')
+                                            success, save_msg = engine.update_trade_extended(base_id, selected_key, save_data)
+                                            
+                                            # 在 Session 中展示 v7.0 高级指标 (暂不存库，只用于显示)
+                                            st.session_state[f"v7_stats_{trade['round_id']}"] = stats
+                                            
+                                            if success:
+                                                st.success("✅ 计算完成！")
+                                                st.session_state[f"show_pa_{trade['round_id']}"] = False 
+                                                time.sleep(0.5)
+                                                st.rerun()
                                     else:
-                                        st.error("❌ 计算失败")
-                                else:
-                                    st.error(f"❌ K线获取失败: {msg}")
+                                        st.error(f"❌ 本地仓库没有 {trade['symbol']} 的数据。请先运行 sync_market_data.py 进行同步！")
                         
-                        # 展示数据 (带 R 单位)
-                        if has_pa_data:
-                            curr_mae = float(trade_row.get('mae', 0))
-                            curr_mfe = float(trade_row.get('mfe', 0))
-                            curr_etd = float(trade_row.get('etd', 0))
+                        # === 展示数据 (v7.0 增强版) ===
+                        # 尝试获取实时计算的 v7 stats
+                        v7_stats = st.session_state.get(f"v7_stats_{trade['round_id']}")
+                        
+                        curr_mae = float(trade_row.get('mae', 0))
+                        curr_mfe = float(trade_row.get('mfe', 0))
+                        curr_etd = float(trade_row.get('etd', 0))
+                        
+                        # 第一行：基础 R 倍数
+                        m1, m2, m3 = st.columns(3)
+                        m1.metric("💔 MAE (最大浮亏)", f"{curr_mae:.2f} R")
+                        m2.metric("💰 MFE (最大浮盈)", f"{curr_mfe:.2f} R")
+                        m3.metric("📉 ETD (利润回撤)", f"{curr_etd:.2f} R")
+                        
+                        # 第二行：v7.0 高级心理指标 (如果有)
+                        if v7_stats:
+                            st.caption("🧠 心理/效率分析 (v7.0 Pro)")
+                            p1, p2, p3 = st.columns(3)
                             
-                            m1, m2, m3 = st.columns(3)
-                            # 颜色逻辑：MAE是负数，越小越红；MFE是正数，越大越绿
-                            m1.metric("💔 MAE (最大浮亏)", f"{curr_mae:.2f} R", help="持仓期间最惨亏了多少个 R")
-                            m2.metric("💰 MFE (最大浮盈)", f"{curr_mfe:.2f} R", help="持仓期间最高赚了多少个 R")
-                            m3.metric("📉 回撤 (利润回吐)", f"{curr_etd:.2f} R", help="从最高点回吐了多少个 R")
+                            # MAD: 痛苦时长
+                            mad_min = v7_stats.get('MAD', 0)
+                            p1.metric("⏳ MAD (痛苦时长)", f"{mad_min} min", help="持仓期间浮亏的总时长")
                             
-                            # AI 规则提示 (基于 R)
-                            if curr_mae < -1.5:
-                                st.warning(f"⚠️ 风险警报：MAE 达到 {curr_mae:.2f}R。通常止损是 -1R，你是否扛单了？")
-                            if curr_mfe > 3.0 and curr_etd > 1.5:
-                                st.warning(f"⚠️ 卖飞警报：曾拿到 {curr_mfe:.2f}R 的大利润，但回吐了 {curr_etd:.2f}R。")
+                            # Efficiency: 卖飞指标
+                            eff = v7_stats.get('Efficiency', 0)
+                            p2.metric("🎯 交易效率", f"{eff:.2f}", help="1.0=卖在最高点")
+                            
+                            # ATR: 波动率风险
+                            mae_atr = v7_stats.get('MAE_ATR', 0)
+                            p3.metric("🌊 MAE (ATR)", f"{mae_atr:.1f} xATR", help="你抗了多少倍的波动率？>2.0 非常危险")
                     
                     st.markdown("---")
                     

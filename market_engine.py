@@ -13,10 +13,21 @@ class MarketDataEngine:
     2. 提供毫秒级的 K 线查询服务 (不再依赖实时 API)
     3. 自动处理交易所权重限制 (Rate Limits)
     """
-    def __init__(self, db_path="market_data.db"):
-        # 锁定数据库路径
+    def __init__(self, db_path=None):
+        # --- 核心修改：自动定位到 data 目录，确保数据持久化 ---
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        self.db_path = os.path.join(base_dir, db_path)
+        
+        # 优先检查是否存在 data 目录 (Docker 挂载目录)
+        data_dir = os.path.join(base_dir, 'data')
+        if os.path.exists(data_dir) and os.path.isdir(data_dir):
+            self.db_path = os.path.join(data_dir, 'market_data.db')
+        else:
+            # 如果没有 data 目录，回退到默认路径
+            if db_path is None:
+                db_path = 'market_data.db'
+            self.db_path = os.path.join(base_dir, db_path)
+            
+        print(f"📉 市场数据仓库位置: {self.db_path}")
         
         # 初始化公开交易所实例 (用于下载 K 线，无需 API Key)
         self.public_exchange = ccxt.binance({

@@ -6,4 +6,8 @@ plotly
 openai
 python-docx
 chromadb
+# 注意：Python 3.12 可能不需要 pysqlite3-binary，但为了保险起见先留着
+# 如果构建报错 sqlite3 相关问题，我们再处理
 pysqlite3-binary ; sys_platform == 'linux'
+# 恢复官方包，因为它支持 Python 3.12
+pandas_ta

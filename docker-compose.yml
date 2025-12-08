@@ -5,14 +5,17 @@ services:
     ports:
       - "8501:8501"
     volumes:
-      # 挂载数据目录，确保数据持久化
-      - ./data:/app/data
-      # 挂载上传文件目录
-      - ./uploads:/app/uploads
-      # 挂载记忆数据库目录 (v5.0 RAG 记忆系统)
-      - ./trade_memory_db:/app/trade_memory_db
+      # --- 热重载模式：挂载整个项目目录，代码修改立即生效 ---
+      - ./:/app
+      
+      # 注意：以下子目录挂载已被上面的 ./:/app 覆盖，保留注释仅作说明
+      # - ./data:/app/data
+      # - ./uploads:/app/uploads
+      # - ./trade_memory_db:/app/trade_memory_db
     restart: unless-stopped
     environment:
       - STREAMLIT_SERVER_HEADLESS=true
       - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+      # 开启 Streamlit 的开发模式，让它更积极地检测变更
+      - STREAMLIT_SERVER_RUN_ON_SAVE=true
 
