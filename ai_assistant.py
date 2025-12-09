@@ -4,6 +4,8 @@ import json
 import base64
 import mimetypes
 import os
+import pandas_ta as ta
+from market_engine import MarketDataEngine
 
 def get_client(api_key, base_url):
     """
@@ -46,47 +48,204 @@ def call_api_with_retry(client, api_params, max_retries=2):
             else:
                 raise e
 
+# ======================================================
+# 🧠 AI 独立分析插件 (V7.0 Core)
+# ======================================================
+class AIAssistant:
+    def __init__(self, api_key=None, base_url=None):
+        """
+        初始化 AI 助手
+        api_key: OpenAI API Key (如果为 None，尝试从环境变量获取)
+        base_url: API Base URL (如果为 None，使用默认值)
+        """
+        # 尝试从环境变量或参数获取 Key
+        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
+        self.base_url = base_url or "https://api.deepseek.com"
+        self.client = None
+        if self.api_key:
+            self.client = get_client(self.api_key, self.base_url)
+            
+        # 初始化数据引擎 (用于后台静默分析)
+        self.market_engine = MarketDataEngine()
+
+    def check_key(self):
+        return self.api_key is not None
+
+    def set_key(self, key, base_url=None):
+        self.api_key = key
+        self.base_url = base_url or self.base_url
+        self.client = get_client(self.api_key, self.base_url)
+
+    def _analyze_vegas_trend(self, symbol, open_time):
+        """后台自动计算 Vegas 趋势"""
+        try:
+            # 清洗 symbol
+            clean_symbol = symbol.split(':')[0]
+            if "USDT" in clean_symbol and "/" not in clean_symbol:
+                clean_symbol = clean_symbol.replace("USDT", "/USDT")
+            
+            # 获取 4H 数据 (回溯 120 天以计算 EMA169)
+            lookback = 120 * 24 * 60 * 60 * 1000
+            start_ts = open_time - lookback
+            # 只需取到开仓时刻即可
+            df = self.market_engine.get_klines_df(clean_symbol, start_ts, open_time + 60000)
+            
+            if df.empty or len(df) < 1000:  # 1m 数据不够聚合
+                return "数据不足，无法判断"
+            
+            # 重采样为 4H
+            if 'datetime' in df.columns:
+                df.set_index('datetime', inplace=True)
+            elif df.index.name != 'datetime':
+                # 如果没有 datetime 列，尝试从 timestamp 创建
+                if 'timestamp' in df.columns:
+                    df['datetime'] = pd.to_datetime(df['timestamp'], unit='ms')
+                    df.set_index('datetime', inplace=True)
+            
+            df_4h = df.resample('4h').agg({'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last'}).dropna()
+            
+            if len(df_4h) < 170:
+                return "历史数据不足计算 Vegas"
+            
+            # 计算 EMA 144/169
+            ema144 = ta.ema(df_4h['close'], length=144)
+            ema169 = ta.ema(df_4h['close'], length=169)
+            
+            if pd.isna(ema144.iloc[-1]) or pd.isna(ema169.iloc[-1]):
+                return "数据不足计算 Vegas 均线"
+            
+            price = df_4h.iloc[-1]['close']
+            ema144_val = ema144.iloc[-1]
+            ema169_val = ema169.iloc[-1]
+            
+            # 判定趋势
+            if price > ema144_val and price > ema169_val:
+                return "🟢 4H级别多头趋势 (价格 > Vegas隧道)"
+            elif price < ema144_val and price < ema169_val:
+                return "🔴 4H级别空头趋势 (价格 < Vegas隧道)"
+            else:
+                return "🟡 4H级别震荡/穿越中"
+        except Exception as e:
+            return f"趋势分析失败: {str(e)}"
+
+    def _analyze_missed_profit(self, symbol, direction, close_time, exit_price):
+        """后台自动计算是否卖飞 (推演未来 24H)"""
+        try:
+            clean_symbol = symbol.split(':')[0]
+            if "USDT" in clean_symbol and "/" not in clean_symbol:
+                clean_symbol = clean_symbol.replace("USDT", "/USDT")
+            
+            # 查未来 24 小时数据
+            future_end = close_time + (24 * 60 * 60 * 1000)
+            df = self.market_engine.get_klines_df(clean_symbol, close_time, future_end)
+            
+            if df.empty:
+                return "无未来数据 (可能刚平仓)"
+            
+            # 如果 exit_price 为 None 或 0，从 K 线数据中获取平仓价格
+            if exit_price is None or exit_price == 0:
+                # 获取平仓时刻的 K 线数据
+                close_df = self.market_engine.get_klines_df(clean_symbol, close_time - 60000, close_time + 60000)
+                if not close_df.empty:
+                    exit_price = close_df.iloc[-1]['close']
+                else:
+                    # 如果还是获取不到，使用未来数据的第一根 K 线的开盘价
+                    exit_price = df.iloc[0]['open']
+            
+            # 计算潜在极值
+            potential_high = df['high'].max()
+            potential_low = df['low'].min()
+            
+            exit_price = float(exit_price)
+            
+            if "Long" in direction:
+                # 做多：如果未来最高价比平仓价高出 2% 以上，算卖飞
+                missed_pct = (potential_high - exit_price) / exit_price * 100
+                if missed_pct > 2.0:
+                    return f"🍖 严重卖飞！离场后价格继续上涨了 {missed_pct:.2f}%"
+                elif missed_pct < -1.0:  # 后面跌了
+                    return "🏆 成功逃顶 (离场后价格下跌)"
+                else:
+                    return "✅ 正常离场 (后续波动不大)"
+            else:
+                # 做空：如果未来最低价比平仓价低 2% 以上
+                missed_pct = (exit_price - potential_low) / exit_price * 100
+                if missed_pct > 2.0:
+                    return f"🍖 严重卖飞！离场后价格继续下跌了 {missed_pct:.2f}%"
+                elif missed_pct < -1.0:  # 后面涨了
+                    return "🏆 成功逃顶 (离场后价格反弹)"
+                else:
+                    return "✅ 正常离场"
+                    
+        except Exception as e:
+            return f"卖飞分析失败: {str(e)}"
+
 def audit_single_trade(api_key, base_url, trade_data, system_manifesto="", strategy_rules="", image_path=None, model_name="deepseek-chat", related_memories=[]):
     """
-    v5.0 RAG 记忆系统版：支持历史记忆检索，实现"类人记忆"功能
+    v7.0 自动分析版：AI 自动分析 Vegas 趋势和卖飞情况，无需前端手动传递
     """
     try:
         # 直接使用传入的 base_url，不乱改
         client = get_client(api_key, base_url)
         
-        # 1. 准备文本上下文 (Context)
-        t = trade_data
-        pnl_emoji = "💰 盈利" if t.get('net_pnl', 0) > 0 else "💸 亏损"
+        # ============ 🧠 v7.0 新增：AI 自动分析 ============
+        # 创建 AI 助手实例，让它自动分析趋势和卖飞情况
+        ai_helper = AIAssistant(api_key=api_key, base_url=base_url)
         
-        # === 新增：解析 MAE/MFE ===
+        # 执行后台静默分析 (Auto-Analysis)
+        t = trade_data
+        trend_context = ai_helper._analyze_vegas_trend(
+            t.get('symbol'), 
+            t.get('open_time')
+        )
+        what_if_result = ai_helper._analyze_missed_profit(
+            t.get('symbol'), 
+            t.get('direction'), 
+            t.get('close_time'), 
+            t.get('price')
+        )
+        # ====================================================
+        
+        # 1. 准备文本上下文 (Context)
+        pnl_emoji = "✅" if t.get('net_pnl', 0) > 0 else "❌"
+        
+        # === 解析 MAE/MFE ===
         # 从数据库读出来的可能是 None，给个默认值
         mae = t.get('mae')
         mfe = t.get('mfe')
         etd = t.get('etd')
+        mad = t.get('mad')
+        eff = t.get('efficiency')
+        mae_atr = t.get('mae_atr')
         
-        pa_info = ""
-        if mae is not None and mfe is not None:
-            pa_info = f"""
-        【价格行为分析 (机器实测 - R倍数)】
-        - 最大浮亏 (MAE): {float(mae):.2f} R (如果亏损很小但止损设很大，说明止损不合理)
-        - 最大浮盈 (MFE): {float(mfe):.2f} R (曾经拿到过这么多利润)
-        - 利润回撤 (ETD): {float(etd):.2f} R (从最高点回撤了多少个 R)
+        # 心理与波动率数据
+        metrics_text = ""
+        if mae is not None:
+            metrics_text = f"""
+        【微观数据 (Micro)】
+        - R倍数: MAE -{float(mae):.2f}R | MFE +{float(mfe):.2f}R
+        - 心理压力: 痛苦时长(MAD) {mad}分钟 | 抗单程度 {float(mae_atr):.1f}x ATR
+        - 交易质量: 效率系数 {float(eff):.2f} (1.0完美)
         """
         else:
-            pa_info = "【价格行为】: 数据未计算 (请先在前端点击'还原过程 (R模式)')"
+            metrics_text = "【价格行为】: 数据未计算 (请先在前端点击'还原过程 (R模式)')"
         
         context_text = f"""
         【交易档案】
-        - 标的/方向: {t.get('symbol', 'N/A')} ({t.get('direction', 'N/A')})
+        - 标的: {t.get('symbol', 'N/A')} ({t.get('direction', 'N/A')})
         - 结果: {pnl_emoji} ${t.get('net_pnl', 0):.2f}
+        - 时间: {t.get('open_date_str', 'N/A')}
         
-        {pa_info}
+        {metrics_text}
         
-        【自我评估】
-        - 策略: {t.get('strategy', '未填写')}
-        - 笔记: "{t.get('notes', '未填写')}"
-        - 心理: {t.get('mental_state', '-')}
-        - 执行: {t.get('process_tag', '-')}
+        【上帝视角分析 (AI Auto-Generated)】
+        - 宏观趋势 (4H Vegas): {trend_context}
+        - 离场评价 (未来推演): {what_if_result}
+        
+        【交易者笔记】
+        策略: {t.get('strategy', '无')}
+        心态: {t.get('mental_state', '无')}
+        复盘: {t.get('notes', '无')}
         """
         
         # === 构建 RAG 记忆上下文 ===
@@ -113,27 +272,42 @@ def audit_single_trade(api_key, base_url, trade_data, system_manifesto="", strat
         else:
             memory_text = "【长期记忆】: 暂无相关历史记录。"
         
-        # 2. 构建 System Prompt
+        # 2. 构建 System Prompt (v7.0 增强版)
         manifesto_part = f"【系统宪法】: {system_manifesto}" if system_manifesto else ""
         strategy_part = f"【策略定义】: {strategy_rules}" if strategy_rules else ""
         
         system_prompt = f"""
-        你是一名拥有鹰眼的【交易审计师】。你的核心能力是结合【K线图表】、【价格行为数据】、【交易员笔记】以及【历史记忆】进行交叉验证。
+        你是一名华尔街顶级交易员教练，以犀利、毒舌但切中要害著称。
         
         {manifesto_part}
         {strategy_part}
         {memory_text}
         
-        请执行以下审计：
-        1. **历史模式识别**：对比【长期记忆】中的教训，检查交易员是否在"重蹈覆辙"？(例如：过去说过不追涨，今天又追了吗？)
-        2. **数据打脸验证**：对比交易员的笔记和客观的 MAE/MFE 数据。
-           - 如果他说"严格止损"，但 MAE 显示他扛单了 10%，请狠狠批评。
-           - 如果他说"止盈完美"，但 MFE 显示他卖飞了 50%，请指出他的短视。
-           - 如果利润回撤 (ETD) 超过 50%，请警告他"过山车"风险。
-        3. **图文一致性**：(如有图) 验证入场逻辑。
-        4. **情绪验证**：寻找知行不一的迹象。
+        请结合【宏观趋势】、【微观数据】和【未来推演】对这笔交易进行全方位审计。
         
-        注意：如果无法查看图片，请侧重分析 MAE/MFE 数据。
+        审计逻辑：
+        1. **顺势/逆势检查**：看"宏观趋势"和交易方向是否一致。如果逆势且亏损，请严厉批评；如果逆势但赚钱，警告他是运气好。
+        2. **卖飞/死扛检查**：
+           - 如果"离场评价"显示"严重卖飞"，请质问他的止盈逻辑。
+           - 如果 MAD(痛苦时长) 很长但最后没赚钱，批评他的入场点选择。
+        3. **R倍数评价**：E-Ratio (MFE/MAE) 是否合理？
+        4. **历史模式识别**：对比【长期记忆】中的教训，检查交易员是否在"重蹈覆辙"？
+        5. **图文一致性**：(如有图) 验证入场逻辑。
+        
+        输出格式：
+        ### 🎯 深度审计报告
+        
+        **1. 宏观与择时评价**
+        (结合 Vegas 趋势点评...)
+        
+        **2. 执行质量分析**
+        (结合抗单ATR、痛苦时长、是否卖飞点评...)
+        
+        **3. 心理侧写**
+        (分析他是在贪婪还是恐惧...)
+        
+        **💡 改进建议**
+        (一针见血的 1 句话)
         """
         
         messages = [{"role": "system", "content": system_prompt}]
