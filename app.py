@@ -1425,7 +1425,8 @@ if selected_key:
                                                 'etd': float(stats['ETD']),
                                                 'mae_atr': float(stats['MAE_ATR']),
                                                 'mfe_atr': float(stats['MFE_ATR']),
-                                                'rvol': float(stats.get('RVOL', 1.0))  # 👈 新增
+                                                'rvol': float(stats.get('RVOL', 1.0)),
+                                                'pattern_signal': stats.get('Pattern', '无显著形态')  # 👈 新增
                                             }
                                             base_id = trade['round_id'].replace('_OPEN', '').replace('_CLOSE', '')
                                             success, save_msg = engine.update_trade_extended(base_id, selected_key, save_data)
@@ -1477,13 +1478,39 @@ if selected_key:
                             rvol_val = v7_stats.get('RVOL', 0)
                             rvol_max = v7_stats.get('Max_RVOL', 0)
                             
-                            st.caption("🔊 市场热度 (Volume)")
+                            st.caption("🔊 市场热度 (Volume & Patterns)")
                             v1, v2, v3 = st.columns(3)
                             v1.metric("📊 平均 RVOL", f"{rvol_val:.2f}", help=">1.0 表示比平时活跃，>2.0 表示放量")
                             v2.metric("🔥 峰值 RVOL", f"{rvol_max:.2f}", help="持仓期间最大的瞬间成交量倍数")
                             
-                            vol_status = "放量" if rvol_val > 1.2 else "缩量" if rvol_val < 0.8 else "正常"
-                            v3.info(f"成交状态：**{vol_status}**")
+                            # v8.1 形态展示 (带备注版)
+                            pattern_str = v7_stats.get('Pattern', '无显著形态')
+                            v3.info(f"信号: **{pattern_str}**")
+                            
+                            # === 🧠 新增：形态智能备注 (Knowledge Card) ===
+                            # 定义形态字典：{关键词: (全名, 表现形式, 含义)}
+                            PATTERN_DICT = {
+                                '吞没': ('吞没形态 (Engulfing)', '后一根实体完全包住前一根实体 (阴→阳 为看涨，阳→阴 为看跌)', '强反转信号。表明一方力量完全压倒了另一方。'),
+                                '锤子': ('锤子线 (Hammer)', '实体很小，下影线极长 (至少是实体的2倍)，无上影线', '底部反转信号。表明空头尝试砸盘但失败，多头强势收复失地。'),
+                                '十字': ('十字星 (Doji)', '开盘价 ≈ 收盘价，实体几乎为一条线', '多空平衡/变盘信号。原有的趋势受阻，市场陷入犹豫。'),
+                                '星': ('启明/黄昏之星 (Star)', '三根K线组合：长阴/阳 -> 跳空小实体 -> 反向长阳/阴', '经典的强反转信号。中间的小实体(星)代表多空换手，随后的反向K线确认了趋势逆转。'),
+                                '流星': ('流星线 (Shooting Star)', '实体很小，上影线极长，无下影线', '顶部反转信号。表明多头冲高失败，遭到空头猛烈打压。')
+                            }
+                            
+                            if pattern_str and pattern_str != '无显著形态' and pattern_str != '无':
+                                with st.expander(f"📖 什么是【{pattern_str}】?", expanded=True):
+                                    # 遍历字典，如果检测到的字符串里包含关键词，就显示解释
+                                    found_any = False
+                                    for key, (fullname, look, meaning) in PATTERN_DICT.items():
+                                        if key in pattern_str:
+                                            st.markdown(f"**{fullname}**")
+                                            st.markdown(f"- **👀 长什么样**：{look}")
+                                            st.markdown(f"- **💡 意味着什么**：{meaning}")
+                                            st.markdown("---")
+                                            found_any = True
+                                    
+                                    if not found_any:
+                                        st.caption("检测到复合形态，请结合上下文理解。")
                             
                             # === 👇 新增：痛苦路径可视化 (v8.0 升级：带成交量) 👇 ===
                             st.markdown("##### 🎢 痛苦路径回放 (Price & Volume)")
@@ -1550,6 +1577,41 @@ if selected_key:
                                         marker=dict(color='#FF5252', size=5),
                                         name='浮亏'
                                     ), row=1, col=1)
+                                
+                                # === 🕯️ v8.1 新增：形态标注 ===
+                                # 找出所有非 0 的形态点
+                                pattern_cols = ['CDL_ENGULFING', 'CDL_HAMMER', 'CDL_DOJI', 'CDL_STAR', 'CDL_SHOOTINGSTAR']
+                                # 映射中文名
+                                pat_map = {
+                                    'CDL_ENGULFING': '吞没', 
+                                    'CDL_HAMMER': '锤子', 
+                                    'CDL_DOJI': '十字', 
+                                    'CDL_STAR': '星', 
+                                    'CDL_SHOOTINGSTAR': '流星'
+                                }
+                                
+                                # 遍历每一列，找到信号点
+                                for col in pattern_cols:
+                                    if col in chart_df.columns:
+                                        sig_df = chart_df[chart_df[col] != 0]
+                                        if not sig_df.empty:
+                                            # 区分看涨(>0)和看跌(<0)
+                                            # 在图上标记
+                                            for idx, row in sig_df.iterrows():
+                                                pat_name = pat_map.get(col, col)
+                                                # 看涨标在下方，看跌标在上方
+                                                y_pos = row['low'] if row[col] > 0 else row['high']
+                                                color = '#00E676' if row[col] > 0 else '#FF5252'
+                                                ay_offset = 20 if row[col] > 0 else -20
+                                                
+                                                fig.add_annotation(
+                                                    x=row['datetime'], y=y_pos,
+                                                    text=pat_name,
+                                                    showarrow=True, arrowhead=1, arrowcolor=color,
+                                                    ax=0, ay=ay_offset,
+                                                    font=dict(color=color, size=10),
+                                                    row=1, col=1
+                                                )
                                 
                                 # 布局
                                 fig.update_layout(

@@ -219,6 +219,8 @@ def audit_single_trade(api_key, base_url, trade_data, system_manifesto="", strat
         mae_atr = t.get('mae_atr')
         # v8.0 新增
         rvol = t.get('rvol')
+        # v8.1 新增
+        pattern = t.get('pattern_signal', '无显著形态')
         
         # 心理与波动率数据
         metrics_text = ""
@@ -235,6 +237,7 @@ def audit_single_trade(api_key, base_url, trade_data, system_manifesto="", strat
         - R倍数: MAE -{float(mae):.2f}R | MFE +{float(mfe):.2f}R
         - 心理压力: 痛苦时长(MAD) {mad}分钟 | 抗单程度 {float(mae_atr):.1f}x ATR
         - 市场热度: RVOL {float(rvol) if rvol else 0:.2f} ({vol_desc})
+        - 入场信号: {pattern} (K线形态)
         - 交易质量: 效率系数 {float(eff):.2f}
         """
         else:
@@ -295,17 +298,20 @@ def audit_single_trade(api_key, base_url, trade_data, system_manifesto="", strat
         
         请结合【宏观趋势】、【微观数据】和【未来推演】对这笔交易进行全方位审计。
         
-        请重点根据 v8.0 的量化数据进行犀利点评：
-        1. **量价配合 (Volume Check)**：
+        请重点根据 v8.1 的量化数据进行犀利点评：
+        1. **入场信号质量 (Pattern Check)**：
+           - 如果"入场信号"显示"吞没/锤子/启明之星"等反转形态，且方向一致，请表扬他"不仅顺势，还找到了精准的起爆点"。
+           - 如果"入场信号"是"无显著形态"或者相反的形态（如做多却出现流星线），请质疑他的入场依据："你是在凭感觉猜底吗？"
+        2. **量价配合 (Volume Check)**：
            - 如果 RVOL < 0.8 (缩量) 但他做了突破单，请警告："无量突破是诱多，下次看到这种缩量情况要管住手！"
            - 如果 RVOL > 2.0 (放量) 且亏损了，说明遇到了主力剧烈洗盘，安慰他这是非战之罪。
-        2. **顺势/逆势检查**：看"宏观趋势"和交易方向是否一致。如果逆势且亏损，请严厉批评；如果逆势但赚钱，警告他是运气好。
-        3. **卖飞/死扛检查**：
+        3. **顺势/逆势检查**：看"宏观趋势"和交易方向是否一致。如果逆势且亏损，请严厉批评；如果逆势但赚钱，警告他是运气好。
+        4. **卖飞/死扛检查**：
            - 如果"离场评价"显示"严重卖飞"，请质问他的止盈逻辑。
            - 如果 MAD(痛苦时长) 很长但最后没赚钱，批评他的入场点选择。
-        4. **R倍数评价**：E-Ratio (MFE/MAE) 是否合理？
-        5. **历史模式识别**：对比【长期记忆】中的教训，检查交易员是否在"重蹈覆辙"？
-        6. **图文一致性**：(如有图) 验证入场逻辑。
+        5. **R倍数评价**：E-Ratio (MFE/MAE) 是否合理？
+        6. **历史模式识别**：对比【长期记忆】中的教训，检查交易员是否在"重蹈覆辙"？
+        7. **图文一致性**：(如有图) 验证入场逻辑。
         
         输出格式：
         ### 🎯 深度审计报告

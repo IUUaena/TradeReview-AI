@@ -916,7 +916,9 @@ class TradeDataEngine:
                 # === 新增 v7.0 字段 ===
                 'mad', 'efficiency', 'mae_atr', 'mfe_atr',
                 # === 新增 v8.0 字段 ===
-                'rvol'  # 相对成交量
+                'rvol',  # 相对成交量
+                # === 新增 v8.1 字段 ===
+                'pattern_signal'  # 形态信号
             ]
             
             # 过滤无效字段
