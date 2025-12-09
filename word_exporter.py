@@ -1,161 +1,158 @@
-# -*- coding: utf-8 -*-
-
-import sqlite3
-import os
-import sys
-from datetime import datetime, timedelta
+import pandas as pd
 from docx import Document
 from docx.shared import Inches, Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+import os
 
-class WordExporter:
-    """v3.8 路径增强版：强制锁定代码所在文件夹"""
+def create_word_report(df, filename="trade_report.docx", include_ai=True):
+    """
+    导出交易报告到 Word (v7.0 Pro)
     
-    def __init__(self, db_path='trade_review.db', export_dir=None):
-        self.db_path = db_path
-        
-        # --- 核心修复：获取 word_exporter.py 这个文件所在的"绝对路径" ---
-        # 这样无论你怎么运行，它都知道自己是在 D:\TradeReview AI 里面
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        
-        # 拼接出 D:\TradeReview AI\Trading_Reports
-        self.export_dir = os.path.join(base_dir, 'Trading_Reports')
-        
-        # 自动创建文件夹
-        if not os.path.exists(self.export_dir):
-            try:
-                os.makedirs(self.export_dir, exist_ok=True)
-            except Exception as e:
-                print(f"创建目录失败: {e}")
-            
-        print(f"📂 导出目录锁定为: {self.export_dir}")
+    :param df: 交易数据 DataFrame
+    :param filename: 保存的文件名
+    :param include_ai: 是否包含 AI 点评 (False = 原始数据模式)
+    """
+    doc = Document()
     
-    def get_time_cutoff(self, time_range):
-        now = datetime.now()
-        if time_range == 'week': delta = timedelta(weeks=1)
-        elif time_range == 'month': delta = timedelta(days=30)
-        elif time_range == 'year': delta = timedelta(days=365)
-        elif time_range == 'all': return 0
-        else: delta = timedelta(days=30)
-        return int((now - delta).timestamp() * 1000)
+    # === 1. 文档标题 ===
+    heading = doc.add_heading('交易复盘深度报告', 0)
+    heading.alignment = WD_ALIGN_PARAGRAPH.CENTER
     
-    def set_cell_text(self, cell, text, bold=False, color=None, size=None):
-        paragraph = cell.paragraphs[0]
-        run = paragraph.add_run(str(text))
-        if bold: run.bold = True
-        if color: run.font.color.rgb = color
-        if size: run.font.size = Pt(size)
-        return paragraph
+    # 添加导出时间
+    from datetime import datetime
+    doc.add_paragraph(f'生成时间: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
+    doc.add_paragraph(f'报告类型: {"完整复盘 (含AI审计)" if include_ai else "原始数据档案 (无干扰)"}')
+    doc.add_paragraph('---')
     
-    def export_round_trips_to_word(self, rounds_df, raw_df, api_key_tag=None, time_range='month', mode='full'):
-        # 1. 筛选数据
-        cutoff_time = self.get_time_cutoff(time_range)
-        filtered_rounds = rounds_df.copy()
-        if cutoff_time > 0:
-            filtered_rounds = filtered_rounds[filtered_rounds['close_time'] >= cutoff_time]
+    # === 2. 统计摘要 ===
+    total_trades = len(df)
+    win_trades = len(df[df['net_pnl'] > 0])
+    total_pnl = df['net_pnl'].sum()
+    win_rate = (win_trades / total_trades * 100) if total_trades > 0 else 0
+    
+    stats_para = doc.add_paragraph()
+    stats_para.add_run(f'总交易笔数: {total_trades} | ').bold = True
+    stats_para.add_run(f'总盈亏: ${total_pnl:.2f} | ').bold = True
+    stats_para.add_run(f'胜率: {win_rate:.1f}%').bold = True
+    
+    # === 3. 逐笔交易详情 ===
+    # 按平仓时间倒序排列
+    if 'close_time' in df.columns:
+        df = df.sort_values(by='close_time', ascending=False)
         
-        if filtered_rounds.empty:
-            return None, "该时间段内没有找到交易记录。"
+    for index, row in df.iterrows():
+        # 分隔符
+        doc.add_paragraph('_' * 40)
         
-        # 2. 创建文档
-        doc = Document()
+        # 交易标题 (Symbol + Direction + PnL)
+        pnl = row.get('net_pnl', 0)
+        symbol = row.get('symbol', 'Unknown')
+        direction = row.get('direction', 'N/A')
+        date_str = row.get('open_date_str', 'N/A')
         
-        time_range_names = {
-            'week': '最近一周',
-            'month': '最近一月',
-            'year': '最近一年',
-            'all': '全部历史'
-        }
-        mode_title = "交易绩效审计报告" if mode == 'full' else "交易复盘原始数据包"
-        time_range_cn = time_range_names.get(time_range, time_range)
-        title = doc.add_heading(f'{mode_title} ({time_range_cn})', 0)
-        title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        header = doc.add_heading(level=1)
+        run = header.add_run(f"{date_str} | {symbol} ({direction})")
         
-        doc.add_paragraph(f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+        # 结果标记
+        res_text = f"   {'✅ 盈利' if pnl > 0 else '❌ 亏损'} ${pnl:.2f}"
+        res_run = header.add_run(res_text)
+        if pnl > 0:
+            res_run.font.color.rgb = RGBColor(0, 150, 0) # Green
+        else:
+            res_run.font.color.rgb = RGBColor(200, 0, 0) # Red
         
-        if mode == 'raw':
-            note_p = doc.add_paragraph("Prompt: 本文档包含交易员原始记录。")
-            note_p.runs[0].font.color.rgb = RGBColor(100, 100, 100)
-            
-        doc.add_paragraph(f"交易数: {len(filtered_rounds)} | 总盈亏: ${filtered_rounds['net_pnl'].sum():.2f}")
-        doc.add_paragraph("-" * 30)
+        # === 核心数据表格 (v7.0 增强版) ===
+        table = doc.add_table(rows=1, cols=3)
+        table.style = 'Table Grid'
         
-        upload_dir = os.path.join(os.path.dirname(self.db_path), 'uploads')
+        # 表头
+        hdr_cells = table.rows[0].cells
+        hdr_cells[0].text = '基础数据'
+        hdr_cells[1].text = 'R倍数 / 波动率'
+        hdr_cells[2].text = 'v7.0 心理/效率'
         
-        # 3. 遍历交易
-        for idx, (_, trade) in enumerate(filtered_rounds.iterrows(), 1):
-            symbol = trade['symbol']
-            direction = trade['direction']
-            pnl = trade['net_pnl']
-            open_time = trade['open_date_str']
+        # 数据行
+        row_cells = table.add_row().cells
+        
+        # Col 1: 基础
+        price_in = row.get('price', 0)
+        # 尝试获取平仓价，如果没有则不显示
+        row_cells[0].text = (
+            f"策略: {row.get('strategy', '-')}\n"
+            f"心态: {row.get('mental_state', '-')}\n"
+            f"持续: {row.get('duration_str', '-')}"
+        )
+        
+        # Col 2: R倍数 (MAE/MFE)
+        mae = row.get('mae', '-')
+        mfe = row.get('mfe', '-')
+        mae_atr = row.get('mae_atr', None)
+        
+        mae_text = f"MAE: {mae} R"
+        if mae_atr is not None and str(mae_atr) != 'nan':
+            mae_text += f"\n({mae_atr:.1f}x ATR)" # 显示 ATR 倍数
             
-            strategy = trade.get('strategy', '') or "未定义"
-            mental = trade.get('mental_state', '-')
-            process = trade.get('process_tag', '-')
-            rating = trade.get('setup_rating', 0)
-            notes = trade.get('notes', '')
-            ai_audit = trade.get('ai_analysis', '')
+        row_cells[1].text = (
+            f"{mae_text}\n"
+            f"MFE: {mfe} R\n"
+            f"ETD: {row.get('etd', '-')} R"
+        )
+        
+        # Col 3: v7.0 心理指标
+        mad = row.get('mad', '-')
+        eff = row.get('efficiency', '-')
+        
+        eff_str = f"{float(eff):.2f}" if (eff != '-' and str(eff) != 'nan') else "-"
+        
+        row_cells[2].text = (
+            f"痛苦时长 (MAD): {mad} min\n"
+            f"交易效率: {eff_str}\n"
+            f"评分: {row.get('setup_rating', '-')}/10"
+        )
+        
+        # === 交易笔记 (User Input) ===
+        doc.add_heading('📝 你的复盘笔记:', level=3)
+        notes = str(row.get('notes', '无笔记'))
+        doc.add_paragraph(notes)
+        
+        # === 截图 (Image) ===
+        # 支持截图字段，如果存在图片路径
+        screenshot_path = row.get('screenshot', '')
+        if screenshot_path and isinstance(screenshot_path, str):
+            # 尝试多个可能的路径
+            possible_paths = [
+                screenshot_path,  # 直接路径
+                os.path.join(os.path.dirname(os.path.abspath(__file__)), 'uploads', screenshot_path),  # 相对路径
+                os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data', 'uploads', screenshot_path),  # Docker 路径
+            ]
             
-            screenshot = ""
-            if 'screenshot' in trade:
-                screenshot = trade['screenshot']
-            else:
-                raw_row = raw_df[raw_df['id'] == trade['round_id']]
-                if not raw_row.empty:
-                    screenshot = raw_row.iloc[0].get('screenshot', '')
-            
-            pnl_str = f"+${pnl:.2f}" if pnl > 0 else f"-${abs(pnl):.2f}"
-            doc.add_heading(f"#{idx} {symbol} ({direction})  {pnl_str}", level=1)
-            
-            table = doc.add_table(rows=2, cols=4)
-            table.style = 'Table Grid'
-            
-            self.set_cell_text(table.cell(0, 0), "开仓时间", bold=True)
-            self.set_cell_text(table.cell(0, 1), "策略依据", bold=True)
-            self.set_cell_text(table.cell(0, 2), "执行质量", bold=True)
-            self.set_cell_text(table.cell(0, 3), "心态/评分", bold=True)
-            
-            self.set_cell_text(table.cell(1, 0), str(open_time), size=9)
-            self.set_cell_text(table.cell(1, 1), str(strategy), size=9)
-            
-            proc_color = RGBColor(0, 150, 0) if "Good" in str(process) else RGBColor(0, 0, 0)
-            if "Bad" in str(process): proc_color = RGBColor(200, 0, 0)
-            self.set_cell_text(table.cell(1, 2), str(process), color=proc_color, bold=True, size=9)
-            self.set_cell_text(table.cell(1, 3), f"{mental} | {rating}分", size=9)
-            
-            doc.add_paragraph("")
-            if notes:
-                doc.add_heading("📝 笔记:", level=2)
-                p = doc.add_paragraph(str(notes))
-                p.style = 'Quote'
-            
-            if mode == 'full':
-                if ai_audit:
-                    doc.add_heading("👮 AI审计:", level=2)
-                    p_ai = doc.add_paragraph()
-                    run_ai = p_ai.add_run(str(ai_audit))
-                    run_ai.font.color.rgb = RGBColor(50, 50, 150)
-                else:
-                    doc.add_paragraph("[无审计]").italic = True
-            
-            if screenshot:
-                img_path = os.path.join(upload_dir, screenshot)
+            img_found = False
+            for img_path in possible_paths:
                 if os.path.exists(img_path):
-                    doc.add_heading("📈 截图:", level=2)
                     try:
-                        doc.add_picture(img_path, width=Inches(5.5))
-                    except:
-                        doc.add_paragraph("[图片加载失败]")
+                        doc.add_heading('📸 交易截图:', level=3)
+                        doc.add_picture(img_path, width=Inches(5.0))
+                        img_found = True
+                        break
+                    except Exception as e:
+                        pass
             
-            doc.add_page_break()
-            
-        prefix = "Audit_Report" if mode == 'full' else "Raw_Data_Package"
-        filename = f"{prefix}_{time_range}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.docx"
-        save_path = os.path.join(self.export_dir, filename)
+            if not img_found and screenshot_path:
+                # 如果所有路径都找不到，尝试从数据库路径推断
+                # 这里假设 screenshot 是文件名，需要从数据库路径推断 uploads 目录
+                pass
         
-        try:
-            doc.save(save_path)
-            # 返回绝对路径，确保前端显示正确
-            return os.path.abspath(save_path), f"✅ 导出成功！"
-        except Exception as e:
-            return None, f"导出失败: {str(e)}"
+        # === AI 深度审计 (仅在 include_ai=True 时显示) ===
+        if include_ai:
+            ai_analysis = str(row.get('ai_analysis', ''))
+            if ai_analysis and ai_analysis != 'None' and len(ai_analysis) > 5:
+                doc.add_heading('🤖 AI 教练毒舌点评:', level=3)
+                # 使用引用样式或斜体，区分 AI 内容
+                p = doc.add_paragraph()
+                runner = p.add_run(ai_analysis)
+                runner.font.color.rgb = RGBColor(80, 80, 80) # 深灰色
+                runner.italic = True
+    
+    # 保存文件
+    doc.save(filename)
+    return filename
