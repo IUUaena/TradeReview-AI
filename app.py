@@ -2416,12 +2416,24 @@ if selected_key:
                                 
                                 # 保存结果到数据库
                                 if "失败" not in audit_result:
+                                    # === 🛑 修复：使用 update_trade_extended 替代错误的 update_ai_analysis ===
                                     # 提取基础ID
                                     base_id = trade['round_id'].replace('_OPEN', '').replace('_CLOSE', '')
-                                    engine.update_ai_analysis(base_id, audit_result, selected_key)
-                                    st.success("审计完成！结果已存档。")
-                                    time.sleep(1)
-                                    st.rerun()
+                                    
+                                    # 使用扩展更新接口，传入字典
+                                    success, msg = engine.update_trade_extended(
+                                        base_id, 
+                                        selected_key, 
+                                        {'ai_analysis': audit_result}  # 核心：只更新这一个字段
+                                    )
+                                    # === 修复结束 ===
+                                    
+                                    if success:
+                                        st.success("审计完成！结果已存档。")
+                                        time.sleep(1)
+                                        st.rerun()
+                                    else:
+                                        st.error(f"保存失败: {msg}")
                                 else:
                                     st.error(audit_result)
 
