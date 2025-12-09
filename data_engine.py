@@ -912,7 +912,11 @@ class TradeDataEngine:
                 'strategy', 'notes', 'screenshot', 'ai_analysis', # v2.0 字段
                 'mental_state', 'rr_ratio', 'setup_rating', 'process_tag', 'mistake_tags', # v3.0 新字段
                 # === 新增 v4.0 字段 ===
-                'mae', 'mfe', 'etd'
+                'mae', 'mfe', 'etd',
+                # === 新增 v7.0 字段 ===
+                'mad', 'efficiency', 'mae_atr', 'mfe_atr',
+                # === 新增 v8.0 字段 ===
+                'rvol'  # 相对成交量
             ]
             
             # 过滤无效字段

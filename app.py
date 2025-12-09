@@ -1422,7 +1422,10 @@ if selected_key:
                                             save_data = {
                                                 'mae': float(stats['MAE']),
                                                 'mfe': float(stats['MFE']),
-                                                'etd': float(stats['ETD'])
+                                                'etd': float(stats['ETD']),
+                                                'mae_atr': float(stats['MAE_ATR']),
+                                                'mfe_atr': float(stats['MFE_ATR']),
+                                                'rvol': float(stats.get('RVOL', 1.0))  # 👈 新增
                                             }
                                             base_id = trade['round_id'].replace('_OPEN', '').replace('_CLOSE', '')
                                             success, save_msg = engine.update_trade_extended(base_id, selected_key, save_data)
@@ -1470,77 +1473,96 @@ if selected_key:
                             mae_atr = v7_stats.get('MAE_ATR', 0)
                             p3.metric("🌊 MAE (ATR)", f"{mae_atr:.1f} xATR", help="你抗了多少倍的波动率？>2.0 非常危险")
                             
-                            # === 👇 新增：痛苦路径可视化 (v7.0 杀手锏) 👇 ===
-                            st.markdown("##### 🎢 痛苦路径回放 (Pain Path)")
+                            # v8.0 成交量展示
+                            rvol_val = v7_stats.get('RVOL', 0)
+                            rvol_max = v7_stats.get('Max_RVOL', 0)
+                            
+                            st.caption("🔊 市场热度 (Volume)")
+                            v1, v2, v3 = st.columns(3)
+                            v1.metric("📊 平均 RVOL", f"{rvol_val:.2f}", help=">1.0 表示比平时活跃，>2.0 表示放量")
+                            v2.metric("🔥 峰值 RVOL", f"{rvol_max:.2f}", help="持仓期间最大的瞬间成交量倍数")
+                            
+                            vol_status = "放量" if rvol_val > 1.2 else "缩量" if rvol_val < 0.8 else "正常"
+                            v3.info(f"成交状态：**{vol_status}**")
+                            
+                            # === 👇 新增：痛苦路径可视化 (v8.0 升级：带成交量) 👇 ===
+                            st.markdown("##### 🎢 痛苦路径回放 (Price & Volume)")
                             st.caption("红色点标记了你处于浮亏的时刻。灰色区域是 1倍 ATR 的正常波动范围。")
                             
                             chart_df = v7_stats.get('Charts')
                             
                             if chart_df is not None and not chart_df.empty:
+                                from plotly.subplots import make_subplots
                                 import plotly.graph_objects as go
                                 
                                 # 获取入场价格（从 trade_row 中获取）
                                 plot_entry_price = float(trade_row['price'])
                                 
-                                fig = go.Figure()
+                                # === 👇 v8.0 升级：带成交量的双子图 👇 ===
+                                # 创建 2 行 1 列的子图 (K线占 70%，成交量占 30%)
+                                fig = make_subplots(
+                                    rows=2, cols=1, 
+                                    shared_xaxes=True, 
+                                    vertical_spacing=0.05,
+                                    row_heights=[0.7, 0.3]
+                                )
                                 
-                                # 1. 绘制 K 线
+                                # 1. 主图：K 线
                                 fig.add_trace(go.Candlestick(
                                     x=chart_df['datetime'],
                                     open=chart_df['open'], high=chart_df['high'],
                                     low=chart_df['low'], close=chart_df['close'],
                                     name='Price'
-                                ))
+                                ), row=1, col=1)
                                 
-                                # 2. 绘制入场基准线
-                                fig.add_hline(y=plot_entry_price, line_dash="dash", line_color="white", annotation_text="Entry")
+                                # 入场线
+                                fig.add_hline(y=plot_entry_price, line_dash="dash", line_color="white", row=1, col=1)
                                 
-                                # 3. 绘制 ATR 通道 (1x ATR Band)
-                                # 获取开仓时的 ATR
+                                # ATR 通道
                                 first_row = chart_df.iloc[0]
                                 entry_atr = first_row.get('atr', 0)
-                                
                                 if pd.notna(entry_atr) and entry_atr > 0:
-                                    upper_band = plot_entry_price + entry_atr
-                                    lower_band = plot_entry_price - entry_atr
-                                    
-                                    # 绘制半透明的 ATR 通道
                                     fig.add_hrect(
-                                        y0=lower_band, y1=upper_band, 
-                                        fillcolor="gray", opacity=0.15, line_width=0,
-                                        annotation_text="1x ATR (正常噪音)", annotation_position="top right"
+                                        y0=plot_entry_price - entry_atr, y1=plot_entry_price + entry_atr, 
+                                        fillcolor="gray", opacity=0.15, line_width=0, row=1, col=1
                                     )
                                 
-                                # 4. 标记"痛苦区域" (Pain Dots)
-                                # 筛选出浮亏的 K 线
+                                # 2. 副图：成交量 (根据涨跌变色)
+                                colors = ['#26A69A' if c >= o else '#EF5350' for c, o in zip(chart_df['close'], chart_df['open'])]
+                                fig.add_trace(go.Bar(
+                                    x=chart_df['datetime'],
+                                    y=chart_df['volume'],
+                                    marker_color=colors,
+                                    name='Volume'
+                                ), row=2, col=1)
+                                
+                                # 标记痛苦时刻 (Pain Dots)
                                 if "Long" in trade['direction']:
-                                    # 做多：收盘价 < 入场价
                                     pain_mask = chart_df['close'] < plot_entry_price
                                 else:
-                                    # 做空：收盘价 > 入场价
                                     pain_mask = chart_df['close'] > plot_entry_price
-                                    
                                 pain_df = chart_df[pain_mask]
                                 
                                 if not pain_df.empty:
                                     fig.add_trace(go.Scatter(
                                         x=pain_df['datetime'], y=pain_df['close'],
                                         mode='markers', 
-                                        marker=dict(color='#FF5252', size=5, symbol='circle'),
-                                        name='痛苦时刻 (浮亏)'
-                                    ))
+                                        marker=dict(color='#FF5252', size=5),
+                                        name='浮亏'
+                                    ), row=1, col=1)
                                 
-                                # 5. 布局美化
+                                # 布局
                                 fig.update_layout(
-                                    height=450,
+                                    height=550, # 加高一点
                                     margin=dict(l=10, r=10, t=30, b=10),
                                     plot_bgcolor='#1E1E1E', paper_bgcolor='#1E1E1E',
                                     font=dict(color='#E0E0E0'),
                                     xaxis_rangeslider_visible=False,
-                                    title=f"交易路径: {trade['symbol']} ({trade['direction']})",
-                                    xaxis=dict(showgrid=False),
-                                    yaxis=dict(showgrid=True, gridcolor='#333')
+                                    showlegend=False,
+                                    title=f"量价分析: {trade['symbol']}"
                                 )
+                                fig.update_yaxes(gridcolor='#333', row=1, col=1)
+                                fig.update_yaxes(gridcolor='#333', title="Vol", row=2, col=1)
                                 
                                 st.plotly_chart(fig, use_container_width=True)
                                 

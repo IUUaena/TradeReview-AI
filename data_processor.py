@@ -130,35 +130,41 @@ def format_duration(minutes):
 
 def calc_price_action_stats(candles_df, trade_direction, entry_price, exit_price, open_ts, close_ts, amount, risk_amount):
     """
-    v7.0 深度价格行为分析
-    计算: ATR标准化指标, MAD(痛苦时长), Efficiency(交易效率)
+    v8.0 深度价格行为分析 (含 Volume)
     """
     if candles_df is None or candles_df.empty:
         return None
     
-    # 1. 计算 ATR (需 pandas_ta)
+    # 1. 计算技术指标 (ATR 和 RVOL)
     try:
-        # 确保数据量足够，否则 ATR 会全是 NaN
+        # ATR (14)
         candles_df['atr'] = candles_df.ta.atr(length=14)
+        
+        # RVOL (相对成交量): 当前量 / 过去20根均量
+        # 填充0值防止除以0错误
+        vol_ma = candles_df['volume'].rolling(20).mean().replace(0, 1)
+        candles_df['rvol'] = candles_df['volume'] / vol_ma
     except Exception as e:
-        print(f"ATR 计算失败: {e}")
+        print(f"指标计算失败: {e}")
         candles_df['atr'] = np.nan
+        candles_df['rvol'] = 1.0
     
-    # 2. 截取【持仓期间】的数据
-    # buffer 60s
+    # 2. 截取持仓期间
     trade_mask = (candles_df['timestamp'] >= open_ts) & (candles_df['timestamp'] <= close_ts)
     period_df = candles_df.loc[trade_mask].copy()
     
     if period_df.empty:
         return None
     
-    # 获取开仓时刻的 ATR
-    # 如果历史数据不够导致 ATR 为空，则用价格的 1% 代替，避免报错
+    # 获取开仓时的 ATR
     first_atr = period_df.iloc[0]['atr']
-    if pd.isna(first_atr):
-        entry_atr = entry_price * 0.01 
-    else:
-        entry_atr = first_atr
+    entry_atr = first_atr if pd.notna(first_atr) else entry_price * 0.01
+    
+    # === 🔥 计算持仓期间的平均成交量热度 ===
+    # 我们取持仓期间 RVOL 的平均值，看看这笔交易是不是在"热闹"的时候做的
+    avg_rvol = period_df['rvol'].mean()
+    # 也可以算最大热度，看有没有爆发
+    max_rvol = period_df['rvol'].max()
     
     # 3. 计算极值
     period_high = period_df['high'].max()
@@ -169,39 +175,31 @@ def calc_price_action_stats(candles_df, trade_direction, entry_price, exit_price
     final_pnl_amt = 0.0
     
     # 4. 计算 MAD (痛苦时长)
-    mad_minutes = 0
     if "Long" in trade_direction:
         max_profit_amt = (period_high - entry_price) * amount
         max_loss_amt = (period_low - entry_price) * amount
         final_pnl_amt = (exit_price - entry_price) * amount
-        # 痛苦时长：收盘价 < 开仓价 的分钟数
         mad_minutes = len(period_df[period_df['close'] < entry_price])
+        mfe_atr = (period_high - entry_price) / entry_atr
+        mae_atr = (period_low - entry_price) / entry_atr
     else:
         max_profit_amt = (entry_price - period_low) * amount
         max_loss_amt = (entry_price - period_high) * amount
         final_pnl_amt = (entry_price - exit_price) * amount
-        # 痛苦时长：收盘价 > 开仓价 的分钟数
         mad_minutes = len(period_df[period_df['close'] > entry_price])
+        mfe_atr = (entry_price - period_low) / entry_atr
+        mae_atr = (entry_price - period_high) / entry_atr
     
-    # 5. 计算 Efficiency (卖飞程度)
+    # 5. 计算 Efficiency
     efficiency = 0.0
     if max_profit_amt > 0:
         efficiency = final_pnl_amt / max_profit_amt
     
-    # 6. 转换为 R 倍数
+    # 6. R 倍数
     safe_risk = risk_amount if risk_amount > 0 else 1.0
     mfe_r = max_profit_amt / safe_risk
     mae_r = max_loss_amt / safe_risk
     etd_r = (max_profit_amt - final_pnl_amt) / safe_risk
-    
-    # 7. 转换为 ATR 倍数 (v7.0 核心)
-    # 计算公式：(极值 - 开仓价) / ATR
-    if "Long" in trade_direction:
-        mfe_atr = (period_high - entry_price) / entry_atr
-        mae_atr = (period_low - entry_price) / entry_atr
-    else:
-        mfe_atr = (entry_price - period_low) / entry_atr
-        mae_atr = (entry_price - period_high) / entry_atr
     
     return {
         "MAE": mae_r,
@@ -211,7 +209,9 @@ def calc_price_action_stats(candles_df, trade_direction, entry_price, exit_price
         "MFE_ATR": mfe_atr,
         "MAD": mad_minutes,
         "Efficiency": efficiency,
+        "RVOL": avg_rvol,      # 👈 新增：平均相对成交量
+        "Max_RVOL": max_rvol,  # 👈 新增：峰值相对成交量
         "High": period_high,
         "Low": period_low,
-        "Charts": period_df, # 包含 ATR 列的数据
+        "Charts": period_df, 
     }
