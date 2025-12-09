@@ -11,3 +11,4 @@ chromadb
 pysqlite3-binary ; sys_platform == 'linux'
 # 恢复官方包，因为它支持 Python 3.12
 pandas_ta
+ta-lib

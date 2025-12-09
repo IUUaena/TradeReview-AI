@@ -255,6 +255,55 @@ with st.sidebar:
                 st.session_state['system_manifesto'] = system_manifesto
                 st.success(f"已保存! 当前模型: {ai_model}")
         
+        # === ⚙️ AI 模型配置 (v8.7 优选版) ===
+        with st.sidebar.expander("⚙️ AI 模型配置", expanded=True):
+            st.caption("选择 AI 分析引擎 (默认 DeepSeek)")
+            
+            # 1. 定义主流模型列表 (DeepSeek 优先)
+            model_options = [
+                "deepseek-chat",          # DeepSeek V3 (当前主流)
+                "deepseek-reasoner",      # DeepSeek R1 (推理模型)
+                "gemini-2.0-flash-exp",   # Google Gemini (需兼容接口)
+                "gemini-1.5-pro",         # Google Gemini
+                "gpt-4o",                 # OpenAI 旗舰
+                "gpt-4-turbo",            # OpenAI 稳定版
+                "gpt-3.5-turbo",          # OpenAI 性价比
+                "自定义 (Custom)"          # 手动输入入口
+            ]
+            
+            # 2. 状态管理：初始化选中项
+            current_model = st.session_state.get('user_ai_model', 'deepseek-chat')
+            
+            # 确定下拉框的默认 index
+            if current_model in model_options:
+                default_index = model_options.index(current_model)
+            else:
+                default_index = len(model_options) - 1 # 选"自定义"
+                
+            # 3. 下拉选择框
+            selected_option = st.selectbox(
+                "选择模型",
+                options=model_options,
+                index=default_index,
+                key="model_selectbox"
+            )
+            
+            # 4. 逻辑判断
+            if selected_option == "自定义 (Custom)":
+                # 如果选了自定义，显示输入框，并填入当前存的值
+                custom_model = st.text_input(
+                    "请输入模型名称", 
+                    value=current_model if current_model not in model_options else "",
+                    placeholder="例如: claude-3-5-sonnet",
+                    help="请输入你的 API 提供商支持的确切模型名称"
+                )
+                if custom_model:
+                    st.session_state.user_ai_model = custom_model
+            else:
+                st.session_state.user_ai_model = selected_option
+                
+            st.caption(f"✅ 当前生效: `{st.session_state.user_ai_model}`")
+        
         st.divider()
         
         # --- C. 数据同步 (折叠菜单) ---
@@ -412,7 +461,6 @@ with st.sidebar:
                                     st.info(f"📁 文件位置: {abs_file_path}")
                                 else:
                                     st.error("文件生成失败，请检查权限。")
-                                    
                     except Exception as e:
                         st.error(f"导出失败: {e}")
                         import traceback
@@ -1354,8 +1402,10 @@ if selected_key:
                     # ==================================================================
                     # 🔬 价格行为透视 (v7.0 Local Warehouse & ATR)
                     # ==================================================================
+                    # 🔬 Price Action (v8.2 Pro: Price + Volume + Structure + Pattern)
+                    # ==================================================================
                     st.divider()
-                    st.markdown("### 🔬 Price Action (v7.0 Pro)")
+                    st.markdown("### 🔬 Price Action (v8.2 Pro)")
                     
                     has_pa_data = False
                     raw_mae = trade_row.get('mae')
@@ -1372,81 +1422,75 @@ if selected_key:
                         if st.button(btn_label, key=f"btn_pa_{trade['round_id']}"):
                             st.session_state[f"show_pa_{trade['round_id']}"] = True
                     
+                    # === 核心逻辑块 ===
                     if st.session_state.get(f"show_pa_{trade['round_id']}", False) or has_pa_data:
+                        
+                        # 1. 计算逻辑 (Calculation)
                         if st.session_state.get(f"show_pa_{trade['round_id']}", False):
-                            # === v7.0 核心变更：使用 MarketDataEngine 从本地读取 ===
-                            # 初始化本地市场引擎 (单例模式，避免重复连接数据库)
                             if 'market_engine' not in st.session_state:
                                 st.session_state.market_engine = MarketDataEngine()
                             
                             me = st.session_state.market_engine
                             
-                            # =========== 🔧 修复开始：清洗币种名称 ===========
-                            # 你的交易记录里是 "BNB/USDT:USDT"，但仓库里存的是 "BNB/USDT"
-                            # 所以查询前必须把后缀去掉，不然查不到数据
+                            # 清洗 Symbol
                             raw_symbol = trade['symbol']
                             clean_symbol = raw_symbol.split(':')[0] 
                             if "USDT" in clean_symbol and "/" not in clean_symbol:
                                 clean_symbol = clean_symbol.replace("USDT", "/USDT")
-                            # ===============================================
                             
                             entry_price = float(trade_row['price'])
-                            # 获取仓位大小
                             amount = float(trade_row.get('amount', 0) or trade.get('amount', 0) or 0)
                             
                             if entry_price <= 0 or amount <= 0:
                                 st.error("❌ 价格或数量无效，请先编辑交易。")
                             else:
                                 with st.spinner("📦 正在从本地仓库调取数据..."):
-                                    # 关键：多取前 200 分钟数据，为了计算 ATR-14
-                                    # 如果本地没有数据，这里会返回空，提示用户去同步
                                     query_start = trade['open_time'] - (200 * 60 * 1000) 
                                     query_end = trade['close_time']
                                     
-                                    # 👇 注意：这里改成了传入 clean_symbol
-                                    candles = me.get_klines_df(
-                                        clean_symbol, query_start, query_end
-                                    )
+                                    candles = me.get_klines_df(clean_symbol, query_start, query_end)
                                     
                                     if not candles.empty:
-                                        # 调用 v7.0 的计算引擎
+                                        # 计算指标
                                         exit_price = candles.iloc[-1]['close']
                                         stats = calc_price_action_stats(
                                             candles, trade['direction'], entry_price, exit_price,
-                                            trade['open_time'], trade['close_time'], # 传入真实开平仓时间截取
+                                            trade['open_time'], trade['close_time'], 
                                             amount, risk_input
                                         )
                                         
                                         if stats:
-                                            # 保存基本数据到数据库 (兼容旧字段)
+                                            # 保存数据 (v8.2 全字段)
                                             save_data = {
                                                 'mae': float(stats['MAE']),
                                                 'mfe': float(stats['MFE']),
                                                 'etd': float(stats['ETD']),
+                                                'mad': int(stats['MAD']),
+                                                'efficiency': float(stats['Efficiency']),
                                                 'mae_atr': float(stats['MAE_ATR']),
                                                 'mfe_atr': float(stats['MFE_ATR']),
-                                                'rvol': float(stats.get('RVOL', 1.0)),
-                                                'pattern_signal': stats.get('Pattern', '无显著形态')  # 👈 新增
+                                                'rvol': float(stats['RVOL']),
+                                                'pattern_signal': stats['Pattern'],
+                                                # structure_info 暂时不存库或根据需要存
                                             }
                                             base_id = trade['round_id'].replace('_OPEN', '').replace('_CLOSE', '')
                                             success, save_msg = engine.update_trade_extended(base_id, selected_key, save_data)
                                             
-                                            # 在 Session 中展示 v7.0 高级指标 (暂不存库，只用于显示)
                                             st.session_state[f"v7_stats_{trade['round_id']}"] = stats
                                             
                                             if success:
                                                 st.success("✅ 计算完成！")
                                                 st.session_state[f"show_pa_{trade['round_id']}"] = False 
+                                                if 'trades_df' in st.session_state: del st.session_state['trades_df']
                                                 time.sleep(0.5)
                                                 st.rerun()
                                     else:
-                                        # 错误提示也优化一下，告诉用户你要查的是谁
                                         st.error(f"❌ 本地仓库没有 {clean_symbol} 的数据。请点击侧边栏的【一键同步 K 线】！")
                         
-                        # === 展示数据 (v7.0 增强版) ===
-                        # 尝试获取实时计算的 v7 stats
+                        # 2. 展示逻辑 (Display)
                         v7_stats = st.session_state.get(f"v7_stats_{trade['round_id']}")
                         
+                        # --- 修复点：这里是之前报错的地方，确保缩进与上面的 if 对齐 ---
                         curr_mae = float(trade_row.get('mae', 0))
                         curr_mfe = float(trade_row.get('mfe', 0))
                         curr_etd = float(trade_row.get('etd', 0))
@@ -1457,176 +1501,131 @@ if selected_key:
                         m2.metric("💰 MFE (最大浮盈)", f"{curr_mfe:.2f} R")
                         m3.metric("📉 ETD (利润回撤)", f"{curr_etd:.2f} R")
                         
-                        # 第二行：v7.0 高级心理指标 (如果有)
-                        if v7_stats:
-                            st.caption("🧠 心理/效率分析 (v7.0 Pro)")
+                        # 第二行：v7.0/v8.0 高级指标
+                        if v7_stats or has_pa_data:
+                            st.caption("🧠 心理/效率/热度 (v8.2 Pro)")
                             p1, p2, p3 = st.columns(3)
                             
-                            # MAD: 痛苦时长
-                            mad_min = v7_stats.get('MAD', 0)
-                            p1.metric("⏳ MAD (痛苦时长)", f"{mad_min} min", help="持仓期间浮亏的总时长")
+                            # 从 stats 或 row 读取
+                            val_mad = v7_stats.get('MAD') if v7_stats else trade_row.get('mad')
+                            val_eff = v7_stats.get('Efficiency') if v7_stats else trade_row.get('efficiency')
+                            val_atr = v7_stats.get('MAE_ATR') if v7_stats else trade_row.get('mae_atr')
                             
-                            # Efficiency: 卖飞指标
-                            eff = v7_stats.get('Efficiency', 0)
-                            p2.metric("🎯 交易效率", f"{eff:.2f}", help="1.0=卖在最高点")
+                            p1.metric("⏳ MAD (痛苦时长)", f"{val_mad} min" if val_mad else "N/A")
+                            p2.metric("🎯 交易效率", f"{float(val_eff):.2f}" if val_eff else "N/A")
+                            p3.metric("🌊 MAE (ATR)", f"{float(val_atr):.1f} x" if val_atr else "N/A")
                             
-                            # ATR: 波动率风险
-                            mae_atr = v7_stats.get('MAE_ATR', 0)
-                            p3.metric("🌊 MAE (ATR)", f"{mae_atr:.1f} xATR", help="你抗了多少倍的波动率？>2.0 非常危险")
+                            # 第三行：成交量 & 形态
+                            val_rvol = v7_stats.get('RVOL') if v7_stats else trade_row.get('rvol')
+                            val_pat = v7_stats.get('Pattern') if v7_stats else trade_row.get('pattern_signal')
+                            val_struct = v7_stats.get('Structure') if v7_stats else trade_row.get('structure_info')
+                            c_vol, c_pat, c_str = st.columns(3)
+                            c_vol.metric("📊 RVOL (热度)", f"{float(val_rvol):.2f}" if val_rvol else "N/A")
+                            c_pat.info(f"信号: **{val_pat if val_pat else '无'}**")
                             
-                            # v8.0 成交量展示
-                            rvol_val = v7_stats.get('RVOL', 0)
-                            rvol_max = v7_stats.get('Max_RVOL', 0)
+                            if val_struct:
+                                if "⚠️" in str(val_struct): c_str.warning(f"结构: **{val_struct}**")
+                                elif "✅" in str(val_struct): c_str.success(f"结构: **{val_struct}**")
+                                else: c_str.info(f"结构: {val_struct}")
                             
-                            st.caption("🔊 市场热度 (Volume & Patterns)")
-                            v1, v2, v3 = st.columns(3)
-                            v1.metric("📊 平均 RVOL", f"{rvol_val:.2f}", help=">1.0 表示比平时活跃，>2.0 表示放量")
-                            v2.metric("🔥 峰值 RVOL", f"{rvol_max:.2f}", help="持仓期间最大的瞬间成交量倍数")
+                        # 3. 绘图逻辑 (Charts)
+                        # ------------------------------------------------------
+                        # 再次尝试获取 entry_price (防止绘图时丢失)
+                        try:
+                            entry_price = float(trade_row.get('price', 0))
+                            if entry_price == 0: entry_price = float(trade.get('price', 0))
+                        except:
+                            entry_price = 0
+                        chart_df = v7_stats.get('Charts')
+                        
+                        # 🟢 IF 语句开始
+                        if chart_df is not None and not chart_df.empty and entry_price > 0:
+                            from plotly.subplots import make_subplots
+                            import plotly.graph_objects as go
                             
-                            # v8.1 形态展示 (带备注版)
-                            pattern_str = v7_stats.get('Pattern', '无显著形态')
-                            v3.info(f"信号: **{pattern_str}**")
+                            # 创建 2 行 1 列的子图
+                            fig = make_subplots(
+                                rows=2, cols=1, 
+                                shared_xaxes=True, 
+                                vertical_spacing=0.03,
+                                row_heights=[0.7, 0.3]
+                            )
                             
-                            # === 🧠 新增：形态智能备注 (Knowledge Card) ===
-                            # 定义形态字典：{关键词: (全名, 表现形式, 含义)}
-                            PATTERN_DICT = {
-                                '吞没': ('吞没形态 (Engulfing)', '后一根实体完全包住前一根实体 (阴→阳 为看涨，阳→阴 为看跌)', '强反转信号。表明一方力量完全压倒了另一方。'),
-                                '锤子': ('锤子线 (Hammer)', '实体很小，下影线极长 (至少是实体的2倍)，无上影线', '底部反转信号。表明空头尝试砸盘但失败，多头强势收复失地。'),
-                                '十字': ('十字星 (Doji)', '开盘价 ≈ 收盘价，实体几乎为一条线', '多空平衡/变盘信号。原有的趋势受阻，市场陷入犹豫。'),
-                                '星': ('启明/黄昏之星 (Star)', '三根K线组合：长阴/阳 -> 跳空小实体 -> 反向长阳/阴', '经典的强反转信号。中间的小实体(星)代表多空换手，随后的反向K线确认了趋势逆转。'),
-                                '流星': ('流星线 (Shooting Star)', '实体很小，上影线极长，无下影线', '顶部反转信号。表明多头冲高失败，遭到空头猛烈打压。')
-                            }
+                            # --- 主图：K 线 ---
+                            fig.add_trace(go.Candlestick(
+                                x=chart_df['datetime'],
+                                open=chart_df['open'], high=chart_df['high'],
+                                low=chart_df['low'], close=chart_df['close'],
+                                name='Price'
+                            ), row=1, col=1)
                             
-                            if pattern_str and pattern_str != '无显著形态' and pattern_str != '无':
-                                with st.expander(f"📖 什么是【{pattern_str}】?", expanded=True):
-                                    # 遍历字典，如果检测到的字符串里包含关键词，就显示解释
-                                    found_any = False
-                                    for key, (fullname, look, meaning) in PATTERN_DICT.items():
-                                        if key in pattern_str:
-                                            st.markdown(f"**{fullname}**")
-                                            st.markdown(f"- **👀 长什么样**：{look}")
-                                            st.markdown(f"- **💡 意味着什么**：{meaning}")
-                                            st.markdown("---")
-                                            found_any = True
-                                    
-                                    if not found_any:
-                                        st.caption("检测到复合形态，请结合上下文理解。")
+                            # 入场线
+                            fig.add_hline(y=entry_price, line_dash="dash", line_color="yellow", row=1, col=1, annotation_text="Entry")
                             
-                            # === 👇 新增：痛苦路径可视化 (v8.0 升级：带成交量) 👇 ===
-                            st.markdown("##### 🎢 痛苦路径回放 (Price & Volume)")
-                            st.caption("红色点标记了你处于浮亏的时刻。灰色区域是 1倍 ATR 的正常波动范围。")
-                            
-                            chart_df = v7_stats.get('Charts')
-                            
-                            if chart_df is not None and not chart_df.empty:
-                                from plotly.subplots import make_subplots
-                                import plotly.graph_objects as go
-                                
-                                # 获取入场价格（从 trade_row 中获取）
-                                plot_entry_price = float(trade_row['price'])
-                                
-                                # === 👇 v8.0 升级：带成交量的双子图 👇 ===
-                                # 创建 2 行 1 列的子图 (K线占 70%，成交量占 30%)
-                                fig = make_subplots(
-                                    rows=2, cols=1, 
-                                    shared_xaxes=True, 
-                                    vertical_spacing=0.05,
-                                    row_heights=[0.7, 0.3]
+                            # ATR 通道
+                            first_row = chart_df.iloc[0]
+                            entry_atr = first_row.get('atr', 0)
+                            if pd.notna(entry_atr) and entry_atr > 0:
+                                fig.add_hrect(
+                                    y0=entry_price - entry_atr, y1=entry_price + entry_atr, 
+                                    fillcolor="gray", opacity=0.15, line_width=0, row=1, col=1
                                 )
+                            
+                            # --- 红点 (浮亏时刻) ---
+                            if "Long" in trade['direction']:
+                                pain_mask_strict = chart_df['close'] < entry_price
+                            else:
+                                pain_mask_strict = chart_df['close'] > entry_price
                                 
-                                # 1. 主图：K 线
-                                fig.add_trace(go.Candlestick(
-                                    x=chart_df['datetime'],
-                                    open=chart_df['open'], high=chart_df['high'],
-                                    low=chart_df['low'], close=chart_df['close'],
-                                    name='Price'
+                            pain_df = chart_df[pain_mask_strict]
+                            if not pain_df.empty:
+                                fig.add_trace(go.Scatter(
+                                    x=pain_df['datetime'], y=pain_df['close'],
+                                    mode='markers', 
+                                    marker=dict(color='#FF5252', size=4, symbol='circle'),
+                                    name='浮亏时刻'
                                 ), row=1, col=1)
-                                
-                                # 入场线
-                                fig.add_hline(y=plot_entry_price, line_dash="dash", line_color="white", row=1, col=1)
-                                
-                                # ATR 通道
-                                first_row = chart_df.iloc[0]
-                                entry_atr = first_row.get('atr', 0)
-                                if pd.notna(entry_atr) and entry_atr > 0:
-                                    fig.add_hrect(
-                                        y0=plot_entry_price - entry_atr, y1=plot_entry_price + entry_atr, 
-                                        fillcolor="gray", opacity=0.15, line_width=0, row=1, col=1
-                                    )
-                                
-                                # 2. 副图：成交量 (根据涨跌变色)
-                                colors = ['#26A69A' if c >= o else '#EF5350' for c, o in zip(chart_df['close'], chart_df['open'])]
-                                fig.add_trace(go.Bar(
-                                    x=chart_df['datetime'],
-                                    y=chart_df['volume'],
-                                    marker_color=colors,
-                                    name='Volume'
-                                ), row=2, col=1)
-                                
-                                # 标记痛苦时刻 (Pain Dots)
-                                if "Long" in trade['direction']:
-                                    pain_mask = chart_df['close'] < plot_entry_price
-                                else:
-                                    pain_mask = chart_df['close'] > plot_entry_price
-                                pain_df = chart_df[pain_mask]
-                                
-                                if not pain_df.empty:
-                                    fig.add_trace(go.Scatter(
-                                        x=pain_df['datetime'], y=pain_df['close'],
-                                        mode='markers', 
-                                        marker=dict(color='#FF5252', size=5),
-                                        name='浮亏'
-                                    ), row=1, col=1)
-                                
-                                # === 🕯️ v8.1 新增：形态标注 ===
-                                # 找出所有非 0 的形态点
-                                pattern_cols = ['CDL_ENGULFING', 'CDL_HAMMER', 'CDL_DOJI', 'CDL_STAR', 'CDL_SHOOTINGSTAR']
-                                # 映射中文名
-                                pat_map = {
-                                    'CDL_ENGULFING': '吞没', 
-                                    'CDL_HAMMER': '锤子', 
-                                    'CDL_DOJI': '十字', 
-                                    'CDL_STAR': '星', 
-                                    'CDL_SHOOTINGSTAR': '流星'
-                                }
-                                
-                                # 遍历每一列，找到信号点
-                                for col in pattern_cols:
-                                    if col in chart_df.columns:
-                                        sig_df = chart_df[chart_df[col] != 0]
-                                        if not sig_df.empty:
-                                            # 区分看涨(>0)和看跌(<0)
-                                            # 在图上标记
-                                            for idx, row in sig_df.iterrows():
-                                                pat_name = pat_map.get(col, col)
-                                                # 看涨标在下方，看跌标在上方
-                                                y_pos = row['low'] if row[col] > 0 else row['high']
-                                                color = '#00E676' if row[col] > 0 else '#FF5252'
-                                                ay_offset = 20 if row[col] > 0 else -20
-                                                
-                                                fig.add_annotation(
-                                                    x=row['datetime'], y=y_pos,
-                                                    text=pat_name,
-                                                    showarrow=True, arrowhead=1, arrowcolor=color,
-                                                    ax=0, ay=ay_offset,
-                                                    font=dict(color=color, size=10),
-                                                    row=1, col=1
-                                                )
-                                
-                                # 布局
-                                fig.update_layout(
-                                    height=550, # 加高一点
-                                    margin=dict(l=10, r=10, t=30, b=10),
-                                    plot_bgcolor='#1E1E1E', paper_bgcolor='#1E1E1E',
-                                    font=dict(color='#E0E0E0'),
-                                    xaxis_rangeslider_visible=False,
-                                    showlegend=False,
-                                    title=f"量价分析: {trade['symbol']}"
-                                )
-                                fig.update_yaxes(gridcolor='#333', row=1, col=1)
-                                fig.update_yaxes(gridcolor='#333', title="Vol", row=2, col=1)
-                                
-                                st.plotly_chart(fig, use_container_width=True)
+                            
+                            # --- 副图：成交量 ---
+                            colors = ['#26A69A' if c >= o else '#EF5350' for c, o in zip(chart_df['close'], chart_df['open'])]
+                            fig.add_trace(go.Bar(
+                                x=chart_df['datetime'],
+                                y=chart_df['volume'],
+                                marker_color=colors,
+                                name='Volume'
+                            ), row=2, col=1)
+                            # --- 结构位标注 ---
+                            res_price = v7_stats.get('Resistance')
+                            sup_price = v7_stats.get('Support')
+                            if res_price:
+                                fig.add_hline(y=res_price, line_dash="dot", line_color="#EF5350", annotation_text="Res", row=1, col=1)
+                            if sup_price:
+                                fig.add_hline(y=sup_price, line_dash="dot", line_color="#00E676", annotation_text="Sup", row=1, col=1)
+                            # --- 形态标注 ---
+                            pattern_cols = ['CDL_ENGULFING', 'CDL_HAMMER', 'CDL_DOJI', 'CDL_STAR', 'CDL_SHOOTINGSTAR']
+                            pat_map = {'CDL_ENGULFING':'吞没', 'CDL_HAMMER':'锤子', 'CDL_DOJI':'十字', 'CDL_STAR':'星', 'CDL_SHOOTINGSTAR':'流星'}
+                            for col in pattern_cols:
+                                if col in chart_df.columns:
+                                    sig_df = chart_df[chart_df[col] != 0]
+                                    for idx, row in sig_df.iterrows():
+                                        pat_name = pat_map.get(col, col)
+                                        y_pos = row['low'] if row[col] > 0 else row['high']
+                                        color = '#00E676' if row[col] > 0 else '#FF5252'
+                                        ay = 20 if row[col] > 0 else -20
+                                        fig.add_annotation(x=row['datetime'], y=y_pos, text=pat_name, showarrow=True, arrowhead=1, arrowcolor=color, ax=0, ay=ay, font=dict(color=color, size=10), row=1, col=1)
+                            # 布局
+                            fig.update_layout(height=550, margin=dict(l=10, r=10, t=10, b=10), plot_bgcolor='#1E1E1E', paper_bgcolor='#1E1E1E', font=dict(color='#E0E0E0'), xaxis_rangeslider_visible=False, showlegend=False)
+                            fig.update_xaxes(showticklabels=False, row=1, col=1)
+                            fig.update_yaxes(gridcolor='#333', row=1, col=1)
+                            fig.update_yaxes(gridcolor='#333', title="Vol", row=2, col=1)
+                            
+                            st.plotly_chart(fig, use_container_width=True)
+                        
+                        # 🟢 ELSE 语句 (必须与上面的 IF 垂直对齐)
+                        else:
+                            if entry_price <= 0:
+                                st.warning("⚠️ 无法获取正确的入场价格，导致图表无法绘制。")
+                        # ------------------------------------------------------
                                 
                                 # =================================================
                                 # 🎥 沉浸式 K 线回放 (Cinema Mode v3.3 - Init Fix)
@@ -2339,81 +2338,73 @@ if selected_key:
                     else:
                         st.caption("保存复盘笔记后，可请求 AI 进行单笔审计。")
                         
-                    # 单笔审计按钮 (v3.0 正式版)
-                    if st.button("🔍 请求 AI 审计这笔交易", use_container_width=True):
-                        if 'ai_key' not in st.session_state or not st.session_state.get('ai_key'):
-                            st.error("请先在左侧配置 AI Key")
-                        else:
-                            with st.spinner("🧠 AI 正在检索历史记忆并进行审计..."):
-                                from ai_assistant import audit_single_trade
-                                
-                                # 准备数据字典
-                                trade_data_dict = trade_row.to_dict()
-                                # 确保包含 v3.0 字段 (如果 row 里没有，手动补上当前界面的值)
-                                trade_data_dict['mental_state'] = new_mental
-                                trade_data_dict['process_tag'] = new_process
-                                trade_data_dict['setup_rating'] = new_rating
-                                trade_data_dict['rr_ratio'] = new_rr
-                                trade_data_dict['mistake_tags'] = ",".join(new_mistakes)
-                                trade_data_dict['strategy'] = new_strategy
-                                trade_data_dict['notes'] = new_note
-                                # 添加必要的时间字段
-                                if 'open_date_str' not in trade_data_dict:
-                                    trade_data_dict['open_date_str'] = trade.get('open_date_str', '')
-                                if 'close_date_str' not in trade_data_dict:
-                                    trade_data_dict['close_date_str'] = trade.get('close_date_str', '')
-                                if 'duration_str' not in trade_data_dict:
-                                    trade_data_dict['duration_str'] = trade.get('duration_str', '')
-                                if 'net_pnl' not in trade_data_dict:
-                                    trade_data_dict['net_pnl'] = trade.get('net_pnl', 0)
-                                if 'symbol' not in trade_data_dict:
-                                    trade_data_dict['symbol'] = trade.get('symbol', '')
-                                if 'direction' not in trade_data_dict:
-                                    trade_data_dict['direction'] = trade.get('direction', '')
-                                
-                                # 获取当前策略的规则描述
-                                all_strats = engine.get_all_strategies()
-                                current_strat_rules = all_strats.get(new_strategy, "")
-                                
-                                # === 🧠 V5.0 新增：检索记忆 ===
-                                # 用当前的笔记 + 策略作为查询词
-                                query_content = f"{new_note} {new_strategy} {new_mental}"
-                                memories = memory_engine.retrieve_similar_memories(query_content, n_results=3)
-                                # ============================
-                                
-                                # 获取图片路径 (v3.4 Vision)
-                                screenshot_full_path = None
-                                if pd.notna(screenshot_name) and screenshot_name:
-                                    upload_dir = os.path.join(os.path.dirname(engine.db_path), 'uploads')
-                                    possible_path = os.path.join(upload_dir, screenshot_name)
-                                    if os.path.exists(possible_path):
-                                        screenshot_full_path = possible_path
-                                
-                                # 获取配置的模型名称
-                                curr_model = st.session_state.get('ai_model', 'deepseek-chat')
-                                
-                                # 调用 AI (传入 memories)
-                                audit_result = audit_single_trade(
-                                    st.session_state['ai_key'],
-                                    st.session_state.get('ai_base_url', 'https://api.deepseek.com'),
-                                    trade_data_dict,
-                                    st.session_state.get('system_manifesto', ''),
-                                    current_strat_rules,  # 传入策略规则
-                                    image_path=screenshot_full_path,  # 传入图片路径 (v3.4)
-                                    model_name=curr_model,  # 传入模型名称 (v3.4)
-                                    related_memories=memories  # v5.0 RAG 记忆系统
+                    # 🔍 请求AI审计 (v8.7 Fix)
+                    if st.button("🔍 请求 AI 审计这笔交易", key=f"btn_audit_{trade['round_id']}", use_container_width=True):
+                        
+                        # 1. Simple Data Check
+                        if trade_row.get('mae') is None or str(trade_row.get('mae')) == 'nan':
+                            st.toast("⚠️ 建议先点击【🚀 计算 v7.0 指标】，否则 AI 数据不全！")
+                        
+                        # 2. Status Box
+                        status_box = st.status("🤖 AI 正在工作中...", expanded=True)
+                        
+                        try:
+                            # A. Retrieve Memory
+                            status_box.write("📚 正在回顾历史记忆...")
+                            related_memories = ""
+                            if 'memory_engine' in st.session_state:
+                                mems = st.session_state.memory_engine.retrieve_memories(trade_row.get('notes', ''))
+                                if mems:
+                                    related_memories = "\n".join([f"- {m['note']}" for m in mems])
+                            
+                            # B. Initialize AI
+                            if 'ai_assistant' not in st.session_state:
+                                from ai_assistant import AIAssistant
+                                st.session_state.ai_assistant = AIAssistant()
+                            
+                            # C. Call AI
+                            status_box.write("🧠 正在分析 K 线结构与形态...")
+                            
+                            # Get model name from sidebar selection, default to deepseek-chat
+                            model_used = st.session_state.get('user_ai_model', 'deepseek-chat')
+                            
+                            analysis_result = st.session_state.ai_assistant.audit_single_trade(
+                                trade_row, 
+                                related_memories, 
+                                model_name=model_used
+                            )
+                            
+                            # D. Save & Refresh
+                            if analysis_result and "审计失败" not in analysis_result:
+                                status_box.write("💾 正在保存报告...")
+                                success, msg = engine.update_trade(
+                                    trade['round_id'].replace('_OPEN', '').replace('_CLOSE', ''),
+                                    'ai_analysis',
+                                    analysis_result
                                 )
                                 
-                                # 保存结果到数据库
-                                if "失败" not in audit_result:
-                                    # 提取基础ID
-                                    base_id = trade['round_id'].replace('_OPEN', '').replace('_CLOSE', '')
-                                    engine.update_ai_analysis(base_id, audit_result, selected_key)
-                                    st.success("审计完成！结果已存档。")
-                                    time.sleep(1)
-                                    st.rerun()
+                                if success:
+                                    status_box.update(label="✅ 审计完成！", state="complete", expanded=False)
+                                    st.success("报告已生成并保存。")
+                                    
+                                    # Force Refresh
+                                    if 'trades_df' in st.session_state:
+                                        del st.session_state['trades_df']
+                                    time.sleep(0.5)
+                                    st.rerun() 
                                 else:
-                                    st.error(audit_result)
+                                    status_box.update(label="❌ 保存失败", state="error")
+                                    st.error(f"保存错误: {msg}")
+                            else:
+                                status_box.update(label="⚠️ AI 返回异常", state="error")
+                                st.error(f"AI 响应内容: {analysis_result}")
+                                
+                        except Exception as e:
+                            # This except block closes the try block above
+                            status_box.update(label="❌ 发生程序错误", state="error")
+                            st.error(f"Error: {str(e)}")
+                            import traceback
+                            st.code(traceback.format_exc())
 
                 else:
                     # 空状态引导
@@ -2871,8 +2862,8 @@ if selected_key:
                                             try:
                                                 # 调用 OpenAI
                                                 from ai_assistant import get_client
-                                                ai_key = st.session_state.get('ai_key', '')
-                                                ai_base_url = st.session_state.get('ai_base_url', 'https://api.deepseek.com')
+                                ai_key = st.session_state.get('ai_key', '')
+                                ai_base_url = st.session_state.get('ai_base_url', 'https://api.deepseek.com')
                                                 curr_model = st.session_state.get('ai_model', 'gpt-4o')
                                                 
                                                 client = get_client(ai_key, ai_base_url)
@@ -2893,17 +2884,17 @@ if selected_key:
                                                     t_count = len(df_target)
                                                     t_pnl = df_target['net_pnl'].sum()
                                                     t_win_count = len(df_target[df_target['net_pnl'] > 0])
-                                                    t_win = (t_win_count / t_count * 100) if t_count > 0 else 0
-                                                    
+                                    t_win = (t_win_count / t_count * 100) if t_count > 0 else 0
+                                    
                                                     start_date = str(df_target.iloc[0].get('open_date_str', '')) if not df_target.empty else ""
                                                     end_date = str(df_target.iloc[-1].get('close_date_str', '')) if not df_target.empty else ""
-                                                    
-                                                    engine.save_ai_report(
+                                    
+                                    engine.save_ai_report(
                                                         report_title, 
-                                                        start_date,
-                                                        end_date,
-                                                        t_count, t_pnl, t_win, report_content, selected_key
-                                                    )
+                                        start_date,
+                                        end_date,
+                                        t_count, t_pnl, t_win, report_content, selected_key
+                                    )
                                                     st.success("报告已归档！")
                                                 
                                             except Exception as e:
