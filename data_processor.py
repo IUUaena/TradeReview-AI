@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-import pandas_ta as ta
+import pandas_ta as ta  # 👈 必须要有这个库
 
 def process_trades_to_rounds(df):
     """
@@ -12,6 +12,7 @@ def process_trades_to_rounds(df):
     # 1. 向量化预处理
     df = df.sort_values(by='timestamp', ascending=True).reset_index(drop=True)
     
+    # 填充缺失值
     fill_values = {
         'amount': 0.0, 'pnl': 0.0, 'fee': 0.0, 
         'notes': '', 'strategy': '', 'ai_analysis': '',
@@ -42,7 +43,9 @@ def process_trades_to_rounds(df):
             pnl = float(row.pnl)
             commission = float(row.fee)
             timestamp = row.timestamp
+            # 兼容处理 side
             side = str(row.side).lower() if hasattr(row, 'side') else ''
+            # 兼容处理 id
             row_id = str(row.id)
             
             if abs(current_qty) < 0.0000001: 
@@ -55,6 +58,7 @@ def process_trades_to_rounds(df):
                 current_pnl = pnl 
                 current_commission = commission
                 
+                # 缓存元数据
                 meta_cache = {
                     'notes': getattr(row, 'notes', ''),
                     'strategy': getattr(row, 'strategy', ''),
@@ -126,26 +130,50 @@ def format_duration(minutes):
 
 def calc_price_action_stats(candles_df, trade_direction, entry_price, exit_price, open_ts, close_ts, amount, risk_amount):
     """
-    v8.4 深度价格行为分析 (修复 KeyError 问题)
+    v8.5 深度价格行为分析 (修复版 + 趋势结构增强)
     """
     if candles_df is None or candles_df.empty:
         return None
     
-    # === 🛡️ 保险箱 1: 基础指标 (ATR & RVOL) ===
+    # === 🛡️ 保险箱 1: 基础指标 (ATR & RVOL) - 纯 Pandas 稳定版 ===
     try:
-        candles_df['atr'] = candles_df.ta.atr(length=14)
-        vol_ma = candles_df['volume'].rolling(20).mean().replace(0, 1)
+        # 1. 计算 ATR (平均真实波幅) - 不依赖 ta-lib，防止报错
+        # TR = Max(High-Low, abs(High-PrevClose), abs(Low-PrevClose))
+        high = candles_df['high']
+        low = candles_df['low']
+        close = candles_df['close']
+        prev_close = close.shift(1)
+        
+        tr1 = high - low
+        tr2 = (high - prev_close).abs()
+        tr3 = (low - prev_close).abs()
+        
+        # 选取三者中的最大值作为 TR
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        # ATR = TR 的 14 周期移动平均
+        candles_df['atr'] = tr.rolling(window=14).mean()
+        
+        # 2. 计算 RVOL (相对成交量)
+        # 处理分母为 0 的情况，避免报错
+        vol_ma = candles_df['volume'].rolling(window=20).mean()
+        vol_ma = vol_ma.replace(0, np.nan) 
+        
         candles_df['rvol'] = candles_df['volume'] / vol_ma
+        
+        # 填补计算初期的 NaN
+        candles_df['atr'] = candles_df['atr'].bfill()
+        candles_df['rvol'] = candles_df['rvol'].fillna(1.0)
+        
     except Exception as e:
-        print(f"⚠️ 基础指标计算失败: {e}")
-        candles_df['atr'] = np.nan
+        print(f"⚠️ 基础指标计算严重失败: {e}")
+        candles_df['atr'] = entry_price * 0.01 
         candles_df['rvol'] = 1.0
     
-    # === 🛡️ 保险箱 2: K线形态 (Pattern - 修复版) ===
+    # === 🛡️ 保险箱 2: K线形态 (Pattern) ===
     # 修复逻辑：不依赖固定列名，直接取返回结果的第一列
     pattern_cols = ['CDL_ENGULFING', 'CDL_HAMMER', 'CDL_DOJI', 'CDL_STAR', 'CDL_SHOOTINGSTAR']
     for col in pattern_cols:
-        candles_df[col] = 0 # 先初始化为0，防止后面报错
+        candles_df[col] = 0 
     try:
         # 1. 吞没 (Engulfing)
         res = candles_df.ta.cdl_pattern(name="engulfing")
@@ -156,15 +184,12 @@ def calc_price_action_stats(candles_df, trade_direction, entry_price, exit_price
         if res is not None and not res.empty: candles_df['CDL_HAMMER'] = res.iloc[:, 0]
         
         # 3. 十字星 (Doji)
-        # 这里的名字经常变，所以用 iloc[:, 0] 最安全
         res = candles_df.ta.cdl_pattern(name="doji")
         if res is not None and not res.empty: candles_df['CDL_DOJI'] = res.iloc[:, 0]
         
         # 4. 启明/黄昏星 (Star)
-        # 需要把 Morning 和 Evening 合并
         res_m = candles_df.ta.cdl_pattern(name="morningstar")
         res_e = candles_df.ta.cdl_pattern(name="eveningstar")
-        
         star_val = 0
         if res_m is not None and not res_m.empty: star_val += res_m.iloc[:, 0]
         if res_e is not None and not res_e.empty: star_val += res_e.iloc[:, 0]
@@ -185,24 +210,31 @@ def calc_price_action_stats(candles_df, trade_direction, entry_price, exit_price
     if period_df.empty:
         return None
     
-    # === 🛡️ 保险箱 3: 结构位 (Structure) ===
+    # === 🛡️ 保险箱 3: 结构位 (Structure & Trend) - 增强版 ===
     structure_info = "无明显结构"
+    trend_info = "盘整/无趋势" # 新增趋势字段
+    
     nearest_res = None
     nearest_sup = None
     
     try:
+        # 1. 识别分形高低点 (Fractals)
         window = 5 
+        # 滚动窗口判断是否为局部极值
         period_df['is_high'] = period_df['high'].rolling(window*2+1, center=True).max() == period_df['high']
         period_df['is_low'] = period_df['low'].rolling(window*2+1, center=True).min() == period_df['low']
         
+        # 只看入场前的数据来判断结构
         pre_entry_df = period_df[period_df['timestamp'] < open_ts]
         
         if not pre_entry_df.empty:
-            resistances = pre_entry_df[pre_entry_df['is_high']]['high'].tail(3).tolist()
-            supports = pre_entry_df[pre_entry_df['is_low']]['low'].tail(3).tolist()
+            # 获取最近的 3 个高点和 3 个低点
+            last_highs = pre_entry_df[pre_entry_df['is_high']]['high'].tail(3).tolist()
+            last_lows = pre_entry_df[pre_entry_df['is_low']]['low'].tail(3).tolist()
             
-            nearest_res = min([r for r in resistances if r > entry_price], default=None)
-            nearest_sup = max([s for s in supports if s < entry_price], default=None)
+            # --- A. 支撑阻力判断 ---
+            nearest_res = min([r for r in last_highs if r > entry_price], default=None)
+            nearest_sup = max([s for s in last_lows if s < entry_price], default=None)
             
             dist_to_res = (nearest_res - entry_price) / entry_price * 100 if nearest_res else 999
             dist_to_sup = (entry_price - nearest_sup) / entry_price * 100 if nearest_sup else 999
@@ -213,12 +245,32 @@ def calc_price_action_stats(candles_df, trade_direction, entry_price, exit_price
                 structure_info = f"✅ 踩在支撑位 ({nearest_sup:.2f})"
             elif nearest_res and nearest_sup:
                 structure_info = "⇕ 区间震荡中"
+            # --- B. 趋势结构判断 (新增逻辑) ---
+            # 判断 HH/HL (Higher High, Higher Low)
+            if len(last_highs) >= 2 and len(last_lows) >= 2:
+                curr_h, prev_h = last_highs[-1], last_highs[-2]
+                curr_l, prev_l = last_lows[-1], last_lows[-2]
+                
+                # 上升结构
+                if curr_h > prev_h and curr_l > prev_l:
+                    trend_info = "📈 上升结构 (HH+HL)"
+                # 下降结构
+                elif curr_h < prev_h and curr_l < prev_l:
+                    trend_info = "📉 下降结构 (LH+LL)"
+                # 扩张/喇叭口
+                elif curr_h > prev_h and curr_l < prev_l:
+                    trend_info = "📣 扩张结构 (HH+LL)"
+                # 收敛/三角
+                elif curr_h < prev_h and curr_l > prev_l:
+                    trend_info = "📐 收敛结构 (LH+HL)"
+                    
     except Exception as e:
         print(f"⚠️ 结构分析失败: {e}")
     
-    # === 4. 汇总数据 ===
+    # === 4. 汇总信号 (Pattern Signal) ===
     pattern_signal_str = "无显著形态"
     try:
+        # 只扫描入场前3根K线内的信号
         target_indices = period_df[period_df['timestamp'] >= open_ts].index
         if len(target_indices) > 0:
             entry_idx_loc = period_df.index.get_indexer([target_indices[0]])[0]
@@ -235,19 +287,17 @@ def calc_price_action_stats(candles_df, trade_direction, entry_price, exit_price
     except:
         pass
     
-    # 基础指标
+    # === 5. 基础指标计算 (MAE/MFE等) ===
     first_atr = period_df.iloc[0]['atr']
     entry_atr = first_atr if pd.notna(first_atr) else entry_price * 0.01
     
     real_hold_df = period_df[(period_df['timestamp'] >= open_ts) & (period_df['timestamp'] <= close_ts)]
     
     avg_rvol = 1.0
-    max_rvol = 1.0
     if not real_hold_df.empty:
         avg_rvol = float(real_hold_df['rvol'].mean())
-        max_rvol = float(real_hold_df['rvol'].max())
     
-    # 极值
+    # 极值计算
     period_high = period_df['high'].max()
     period_low = period_df['low'].min()
     
@@ -258,7 +308,7 @@ def calc_price_action_stats(candles_df, trade_direction, entry_price, exit_price
     mfe_atr = 0
     mae_atr = 0
     
-    calc_df = period_df[(period_df['timestamp'] >= open_ts) & (period_df['timestamp'] <= close_ts)]
+    calc_df = real_hold_df 
     
     if not calc_df.empty:
         if "Long" in trade_direction:
@@ -289,8 +339,10 @@ def calc_price_action_stats(candles_df, trade_direction, entry_price, exit_price
         "MAE": mae_r, "MFE": mfe_r, "ETD": etd_r,
         "MAE_ATR": mae_atr, "MFE_ATR": mfe_atr,
         "MAD": mad_minutes, "Efficiency": efficiency,
-        "RVOL": avg_rvol, "Max_RVOL": max_rvol, "Pattern": pattern_signal_str,
+        "RVOL": avg_rvol, 
+        "Pattern": pattern_signal_str,
         "Structure": structure_info,
+        "Trend": trend_info,  # 新增
         "Resistance": nearest_res,
         "Support": nearest_sup,
         "High": period_high, "Low": period_low, "Charts": period_df
