@@ -2700,16 +2700,16 @@ if selected_key:
                                                 if os.path.exists(img_path):
                                                     st.image(img_path)
             
-            # === Tab 3: 新增的 AI 批量分析 ===
+            # === Tab 3: AI 周期报告 (导师周报) ===
             with tab_report:
                 # =========================================================
-                # 📅 功能模块：周期性复盘报告 (v7.2 - 固定笔数/时间双模式)
+                # 📅 周期性复盘报告 (v9.0 - 持久化存储版)
                 # =========================================================
                 st.markdown("---")
                 st.header("📅 周期性深度复盘 (System Check)")
-                st.caption("定期体检：检验你的交易系统是否稳定，执行是否合规。")
+                st.caption("定期体检：检验你的交易系统是否稳定，执行是否合规。生成的报告会自动保存。")
                 
-                with st.expander("📊 生成深度复盘报告", expanded=False):
+                with st.expander("📊 生成新报告", expanded=True):
                     # 1. 复盘模式选择 (时间 vs 笔数)
                     col_mode, col_val, col_bench = st.columns([1, 1, 1])
                     
@@ -2756,180 +2756,174 @@ if selected_key:
                                 if df_rounds.empty:
                                     st.warning("⚠️ 无法合成有效交易回合（可能全是未平仓的单子）。")
                                 else:
-                                    # 3. 根据模式筛选数据 (Filter)
+                                    # 3. 根据模式筛选数据 & 生成标识
+                                    report_identifier = ""
+                                    
                                     if review_mode == "按时间周期":
                                         # 筛选最近 N 天
                                         start_date_ts = int((datetime.now() - pd.Timedelta(days=review_val)).timestamp() * 1000)
                                         df_target = df_rounds[df_rounds['close_time'] >= start_date_ts].copy()
-                                        report_title = f"最近 {review_val} 天"
+                                        report_identifier = f"最近 {review_val} 天"
                                     else:
-                                        # 筛选最近 N 笔 (取最后 N 行)
+                                        # 筛选最近 N 笔
+                                        # 计算全局编号：总数 - N + 1 到 总数
+                                        total_rounds = len(df_rounds)
+                                        start_idx = max(1, total_rounds - review_val + 1)
+                                        end_idx = total_rounds
+                                        
                                         df_target = df_rounds.tail(review_val).copy()
-                                        report_title = f"最近 {review_val} 笔交易"
+                                        report_identifier = f"最近 {review_val} 笔 (No.{start_idx} - No.{end_idx})"
                                     
                                     if df_target.empty:
-                                        st.warning(f"⚠️ {report_title} 没有找到已平仓的交易记录。")
+                                        st.warning(f"⚠️ {report_identifier} 没有找到已平仓的交易记录。")
                                     else:
-                                        # === B. 准备大盘数据 (Alpha Check) ===
+                                        # === B. 准备大盘数据 ===
                                         if 'market_engine' not in st.session_state:
                                             st.session_state.market_engine = MarketDataEngine()
                                         me = st.session_state.market_engine
                                         
-                                        # 获取时间范围
                                         first_ts = df_target['open_time'].min()
                                         last_ts = max(df_target['close_time'].max(), int(datetime.now().timestamp()*1000))
                                         
-                                        # 拉取 Benchmark 数据
-                                        with st.spinner(f"正在分析 {report_title} 的表现 vs {benchmark_symbol}..."):
+                                        with st.spinner(f"正在分析 {report_identifier} vs {benchmark_symbol}..."):
                                             btc_df = me.get_klines_df(benchmark_symbol, first_ts, last_ts)
                                         
-                                        market_context_str = ""
                                         btc_return = 0.0
-                                        
-                                        # === C. 绘制资金曲线 vs 大盘 ===
                                         if not btc_df.empty:
                                             base_price = btc_df.iloc[0]['close']
                                             btc_df['pct_change'] = (btc_df['close'] - base_price) / base_price * 100
                                             btc_return = btc_df.iloc[-1]['pct_change']
-                                        
-                                        # 计算用户累计盈亏
-                                        df_target = df_target.sort_values('close_time') # 确保按时间排序
-                                        df_target['cum_pnl'] = df_target['net_pnl'].cumsum()
                                         
                                         # 统计数据
                                         total_pnl = df_target['net_pnl'].sum()
                                         win_rate = len(df_target[df_target['net_pnl'] > 0]) / len(df_target) * 100
                                         avg_rr = df_target[df_target['net_pnl'] > 0]['net_pnl'].mean() / abs(df_target[df_target['net_pnl'] < 0]['net_pnl'].mean()) if not df_target[df_target['net_pnl'] < 0].empty else 0
                                         
-                                        # 绘图
-                                        from plotly.subplots import make_subplots
-                                        import plotly.graph_objects as go
+                                        # === C. 生成 AI 深度报告 ===
+                                        trades_summary = []
+                                        for _, t in df_target.iterrows():
+                                            extra_info = ""
+                                            if 'mad' in t and pd.notna(t['mad']): extra_info += f" | MAD:{t['mad']}m"
+                                            if 'efficiency' in t and pd.notna(t['efficiency']): extra_info += f" | Eff:{t['efficiency']:.2f}"
+                                            trades_summary.append(
+                                                f"- {t.get('close_date_str', 'N/A')} {t.get('symbol', 'N/A')} ${t.get('net_pnl', 0):.2f} | 策略:{t.get('strategy', '无')} | 心态:{t.get('mental_state', '无')}{extra_info}"
+                                            )
+                                        summary_text = "\n".join(trades_summary)
                                         
-                                        fig_alpha = make_subplots(specs=[[{"secondary_y": True}]])
-                                        
-                                        # 资金曲线
-                                        fig_alpha.add_trace(go.Scatter(
-                                            x=pd.to_datetime(df_target['close_time'], unit='ms'), y=df_target['cum_pnl'],
-                                            name="累计盈亏 ($)", mode='lines+markers', line=dict(color='#00E676', width=3)
-                                        ), secondary_y=False)
-                                        
-                                        # 大盘曲线
-                                        if not btc_df.empty:
-                                            # 确保 datetime 列存在
-                                            if 'datetime' in btc_df.columns:
-                                                btc_x = btc_df['datetime']
-                                            elif btc_df.index.name == 'datetime':
-                                                btc_x = btc_df.index
-                                            else:
-                                                btc_x = pd.to_datetime(btc_df['timestamp'], unit='ms')
-                                            
-                                            fig_alpha.add_trace(go.Scatter(
-                                                x=btc_x, y=btc_df['pct_change'],
-                                                name=f"{benchmark_symbol} (%)", mode='lines', line=dict(color='gray', width=1, dash='dot')
-                                            ), secondary_y=True)
-                                        
-                                        fig_alpha.update_layout(
-                                            title=f"📈 资金曲线: {report_title}", 
-                                            height=400, 
-                                            plot_bgcolor='#1E1E1E', 
-                                            paper_bgcolor='#1E1E1E', 
-                                            font=dict(color='#E0E0E0'),
-                                            hovermode='x unified',
-                                            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-                                        )
-                                        fig_alpha.update_yaxes(title_text="累计盈亏 ($)", secondary_y=False, showgrid=True, gridcolor='#333')
-                                        fig_alpha.update_yaxes(title_text="大盘涨跌 (%)", secondary_y=True, showgrid=False)
-                                        
-                                        st.plotly_chart(fig_alpha, use_container_width=True)
-                                        
-                                        # === D. 生成 AI 深度报告 ===
-                                        market_context_str = f"""
-                                        【周期环境】
-                                        - 复盘范围: {report_title}
-                                        - 大盘表现 ({benchmark_symbol}): {btc_return:.2f}%
-                                        - 账户表现: 总盈亏 ${total_pnl:.2f} | 胜率 {win_rate:.1f}% | 盈亏比 {avg_rr:.2f}
+                                        prompt = f"""
+                                        你是一名严厉的交易系统审计师。请根据以下数据生成一份【阶段性体检报告】。
+
+                                        【重要】请在回复的第一行，用【】给这份报告起一个简短犀利的标题，例如【震荡期磨损严重】、【趋势捕捉完美】、【知行不一警告】。
+
+                                        环境: {benchmark_symbol} 涨跌 {btc_return:.2f}%
+
+                                        账户: 盈亏 ${total_pnl:.2f} | 胜率 {win_rate:.1f}% | 盈亏比 {avg_rr:.2f}
+
+                                        交易流水:
+
+                                        {summary_text}
+
+                                        审计重点：
+
+                                        1. 一致性：是否在乱做？
+
+                                        2. 盈亏同源：是否靠运气？
+
+                                        3. 执行力：止损和持仓是否坚决？
+
+                                        输出风格：不要废话，直击痛点。
+
                                         """
                                         
-                                        st.markdown("### 🤖 AI 系统体检报告")
-                                        with st.spinner("AI 正在逐笔核对你的交易系统执行情况..."):
-                                            # 准备交易摘要 (加入策略和心态)
-                                            trades_summary = []
-                                            for _, t in df_target.iterrows():
-                                                # 尝试获取 v7.0 指标
-                                                extra_info = ""
-                                                if 'mad' in t and pd.notna(t['mad']): 
-                                                    extra_info += f" | MAD:{t['mad']}m"
-                                                if 'efficiency' in t and pd.notna(t['efficiency']): 
-                                                    extra_info += f" | Eff:{t['efficiency']:.2f}"
+                                        try:
+                                            from ai_assistant import AIAssistant
+                                            if 'ai_assistant' not in st.session_state:
+                                                st.session_state.ai_assistant = AIAssistant()
+                                            
+                                            # 使用 session 中的 key 和 url
+                                            st.session_state.ai_assistant.set_key(
+                                                st.session_state.get('ai_key'),
+                                                st.session_state.get('ai_base_url')
+                                            )
+                                            
+                                            report_content = st.session_state.ai_assistant.client.chat.completions.create(
+                                                model=st.session_state.get('ai_model', 'deepseek-chat'),
+                                                messages=[
+                                                    {"role": "system", "content": "你是专业的量化交易审计师。"},
+                                                    {"role": "user", "content": prompt}
+                                                ],
+                                                temperature=0.7
+                                            ).choices[0].message.content
+                                            
+                                            # 解析标题 (取第一行，去除 markdown 符号)
+                                            lines = report_content.split('\n')
+                                            title_line = lines[0].strip().replace('#', '').replace('*', '').replace('【', '').replace('】', '')
+                                            if len(title_line) > 20: title_line = title_line[:20] + "..."
+                                            if not title_line: title_line = "系统体检报告"
+                                            
+                                            st.write(report_content)
+                                            
+                                            # 保存报告
+                                            if selected_key:
+                                                start_date = str(df_target.iloc[0].get('open_date_str', ''))
+                                                end_date = str(df_target.iloc[-1].get('close_date_str', ''))
                                                 
-                                                trades_summary.append(
-                                                    f"- {t.get('close_date_str', 'N/A')} {t.get('symbol', 'N/A')} ({t.get('direction', 'N/A')}): ${t.get('net_pnl', 0):.2f} | 策略:{t.get('strategy', '无')} | 心态:{t.get('mental_state', '无')}{extra_info}"
+                                                engine.save_ai_report(
+                                                    title_line, # 标题
+                                                    report_identifier, # 类型/标识
+                                                    start_date,
+                                                    end_date,
+                                                    len(df_target), total_pnl, win_rate, 
+                                                    report_content, 
+                                                    selected_key
                                                 )
+                                                st.success(f"✅ 报告已生成并归档：{title_line}")
+                                                time.sleep(1)
+                                                st.rerun() # 刷新以显示在下方列表
                                             
-                                            summary_text = "\n".join(trades_summary)
-                                            
-                                            # 增强版 Prompt
-                                            prompt = f"""
-                                            你是一名严格的【交易系统审计师】。请根据以下数据为学员生成一份【阶段性系统体检报告】。
-                                            
-                                            {market_context_str}
-                                            
-                                            【交易流水 ({report_title})】
-                                            {summary_text}
-                                            
-                                            请重点审计以下 3 点：
-                                            1. **系统一致性 (System Consistency)**：
-                                               - 检查他的盈利单是否都来自同一个策略？还是东一榔头西一棒槌？
-                                               - 亏损单是否因为违反了策略（看心态和备注）？
-                                            2. **盈亏同源性 (Alpha Check)**：
-                                               - 结合大盘表现，他是靠实力（跑赢大盘）还是靠运气（大盘涨他也涨）？
-                                               - 如果大盘跌他没亏，请给予高度评价。
-                                            3. **执行力打分**：
-                                               - 结合 MAD (痛苦时长) 和 Efficiency (卖飞指数)，评价他的持仓耐心和离场果断度。
-                                            
-                                            输出风格：专业、严厉、数据驱动。最后给出一个【系统评分 (0-100)】和一条【整改建议】。
-                                            """
-                                            
-                                            try:
-                                                # 调用 OpenAI
-                                                from ai_assistant import get_client
-                                                ai_key = st.session_state.get('ai_key', '')
-                                                ai_base_url = st.session_state.get('ai_base_url', 'https://api.deepseek.com')
-                                                curr_model = st.session_state.get('ai_model', 'gpt-4o')
-                                                
-                                                client = get_client(ai_key, ai_base_url)
-                                                
-                                                report_content = client.chat.completions.create(
-                                                    model=curr_model,
-                                                    messages=[
-                                                        {"role": "system", "content": "你是专业的量化交易审计师。"},
-                                                        {"role": "user", "content": prompt}
-                                                    ],
-                                                    temperature=0.7
-                                                ).choices[0].message.content
-                                                
-                                                st.write(report_content)
-                                                
-                                                # 保存报告
-                                                if selected_key:
-                                                    t_count = len(df_target)
-                                                    t_pnl = df_target['net_pnl'].sum()
-                                                    t_win_count = len(df_target[df_target['net_pnl'] > 0])
-                                                    t_win = (t_win_count / t_count * 100) if t_count > 0 else 0
-                                                    
-                                                    start_date = str(df_target.iloc[0].get('open_date_str', '')) if not df_target.empty else ""
-                                                    end_date = str(df_target.iloc[-1].get('close_date_str', '')) if not df_target.empty else ""
-                                                    
-                                                    engine.save_ai_report(
-                                                        report_title, 
-                                                        start_date,
-                                                        end_date,
-                                                        t_count, t_pnl, t_win, report_content, selected_key
-                                                    )
-                                                    st.success("报告已归档！")
-                                                
-                                            except Exception as e:
-                                                st.error(f"AI 生成报告失败: {str(e)}")
+                                        except Exception as e:
+                                            st.error(f"AI 生成失败: {str(e)}")
+                
+                # =========================================================
+                # 📜 历史报告列表 (History)
+                # =========================================================
+                st.markdown("### 📜 历史报告归档 (History)")
+                
+                if not selected_key:
+                    st.info("请先选择账户以查看报告。")
+                else:
+                    # 获取历史报告
+                    reports_df = engine.get_ai_reports(selected_key, limit=20)
+                    
+                    if reports_df.empty:
+                        st.caption("暂无历史报告。")
+                    else:
+                        for idx, row in reports_df.iterrows():
+                            # 构造卡片标题：标题 | 类型 | 日期
+                            # 兼容旧数据 (没有 title 字段的情况)
+                            r_title = row.get('title')
+                            if pd.isna(r_title) or not r_title:
+                                r_title = "系统分析报告"
+                                
+                            expander_title = f"{r_title}  |  {row['report_type']} ({row['start_date']} ~ {row['end_date']})"
+                            
+                            with st.expander(expander_title):
+                                c1, c2, c3 = st.columns([1, 1, 3])
+                                pnl = row['total_pnl']
+                                color = "green" if pnl >= 0 else "red"
+                                c1.markdown(f"**盈亏**: :{color}[${pnl:,.2f}]")
+                                c2.markdown(f"**胜率**: {row['win_rate']:.1f}%")
+                                c3.caption(f"生成时间: {datetime.fromtimestamp(row['created_at']/1000).strftime('%Y-%m-%d %H:%M')}")
+                                
+                                st.markdown("---")
+                                st.markdown(row['ai_feedback'])
+                                
+                                st.markdown("---")
+                                if st.button("🗑️ 删除此报告", key=f"del_rep_{row['id']}"):
+                                    engine.delete_ai_report(row['id'], selected_key)
+                                    st.success("已删除")
+                                    time.sleep(0.5)
+                                    st.rerun()
             
             # === Tab 4: 策略库管理 (从侧边栏移到这里) ===
             with tab_strategy:

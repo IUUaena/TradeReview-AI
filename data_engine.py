@@ -776,35 +776,41 @@ class TradeDataEngine:
             return False, f"❌ 删除失败: {str(e)}"
     
     # ===========================
-    #  🧠 AI 报告管理 (新增)
+    #  🧠 AI 报告管理 (v9.0 增强版)
     # ===========================
     
-    def save_ai_report(self, report_type, start_date, end_date, trade_count, total_pnl, win_rate, ai_feedback, api_key):
-        """保存 AI 生成的阶段性报告"""
+    def save_ai_report(self, title, report_type, start_date, end_date, trade_count, total_pnl, win_rate, ai_feedback, api_key):
+        """保存 AI 生成的阶段性报告 (支持标题)"""
         conn = sqlite3.connect(self.db_path)
         c = conn.cursor()
         try:
             key_tag = api_key.strip()[-4:] if api_key else "MANU"
             created_at = int(datetime.now().timestamp() * 1000)
             
+            # 兼容性处理：如果用户没运行 v9 脚本，表里可能没 title 字段，这里做个 try-catch 或者动态判断
+            # 为了代码简洁，建议务必运行 update_db_v9.py
+            
             c.execute('''
                 INSERT INTO ai_reports 
-                (report_type, start_date, end_date, trade_count, total_pnl, win_rate, ai_feedback, created_at, api_key_tag)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (report_type, start_date, end_date, trade_count, total_pnl, win_rate, ai_feedback, created_at, key_tag))
+                (title, report_type, start_date, end_date, trade_count, total_pnl, win_rate, ai_feedback, created_at, api_key_tag)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', (title, report_type, start_date, end_date, trade_count, total_pnl, win_rate, ai_feedback, created_at, key_tag))
             
             conn.commit()
             return True, "✅ 报告已归档"
         except Exception as e:
+            import traceback
+            traceback.print_exc()
             return False, f"保存失败: {str(e)}"
         finally:
             conn.close()
     
-    def get_ai_reports(self, api_key, limit=10):
-        """获取历史分析报告"""
+    def get_ai_reports(self, api_key, limit=20):
+        """获取历史分析报告 (返回 DataFrame)"""
         conn = sqlite3.connect(self.db_path)
         key_tag = api_key.strip()[-4:] if api_key else "MANU"
         try:
+            # 获取所有字段
             df = pd.read_sql_query(
                 "SELECT * FROM ai_reports WHERE api_key_tag = ? ORDER BY created_at DESC LIMIT ?", 
                 conn, params=(key_tag, limit)
@@ -813,6 +819,20 @@ class TradeDataEngine:
             df = pd.DataFrame()
         conn.close()
         return df
+    
+    def delete_ai_report(self, report_id, api_key):
+        """删除指定的 AI 报告"""
+        conn = sqlite3.connect(self.db_path)
+        c = conn.cursor()
+        key_tag = api_key.strip()[-4:] if api_key else "MANU"
+        try:
+            c.execute("DELETE FROM ai_reports WHERE id = ? AND api_key_tag = ?", (report_id, key_tag))
+            conn.commit()
+            return True, "🗑️ 报告已删除"
+        except Exception as e:
+            return False, f"删除失败: {str(e)}"
+        finally:
+            conn.close()
     
     # ===========================
     #  ⚙️ 系统配置管理 (Bug Fix)
