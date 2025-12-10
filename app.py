@@ -220,9 +220,7 @@ with st.sidebar:
             # 2. 加载当前配置
             db_base_url = engine.get_setting('ai_base_url', "https://api.deepseek.com")
             db_key = engine.get_setting('ai_key', "")
-            db_model = engine.get_setting('ai_model', "deepseek-chat") 
-            db_manifesto = engine.get_setting('system_manifesto', 
-                "1. 绝不扛单，亏损达到 2% 无条件止损。\n2. 只做日线级别的顺势交易。\n3. 连续亏损 2 笔强制停止交易一天。")
+            db_model = engine.get_setting('ai_model', "deepseek-chat")
             
             # 3. 输入框 (允许微调)
             ai_base_url = st.text_input("API Base URL", value=db_base_url)
@@ -239,20 +237,14 @@ with st.sidebar:
                 index=0 if db_model not in current_preset_models else current_preset_models.index(db_model)
             )
             
-            st.markdown("---")
-            st.caption("📜 System Manifesto (系统宪法)")
-            system_manifesto = st.text_area("我的交易铁律", value=db_manifesto, height=150)
-            
             if st.button("💾 保存配置"):
                 engine.set_setting('ai_base_url', ai_base_url)
                 engine.set_setting('ai_key', ai_key)
                 engine.set_setting('ai_model', ai_model)
-                engine.set_setting('system_manifesto', system_manifesto)
                 
                 st.session_state['ai_base_url'] = ai_base_url
                 st.session_state['ai_key'] = ai_key
                 st.session_state['ai_model'] = ai_model
-                st.session_state['system_manifesto'] = system_manifesto
                 st.success(f"已保存! 当前模型: {ai_model}")
         
         st.divider()
@@ -2893,9 +2885,34 @@ if selected_key:
                                     time.sleep(0.5)
                                     st.rerun()
             
-            # === Tab 4: 策略库管理 (从侧边栏移到这里) ===
+            # === Tab 4: 策略库管理 ===
             with tab_strategy:
-                st.subheader("📚 策略库管理 (Strategy Library)")
+                st.subheader("📚 策略库 & 系统宪法")
+                
+                # ==========================================
+                # 1. 系统宪法 (从侧边栏移到这里)
+                # ==========================================
+                with st.expander("📜 个人交易宪法 (最高准则)", expanded=True):
+                    st.caption("AI 风控官和审计师将严格依据此宪法对你进行监督。")
+                    
+                    # 从 session_state 读取当前值
+                    current_manifesto = st.session_state.get('system_manifesto', "")
+                    
+                    # 文本输入框
+                    new_manifesto = st.text_area("我的交易铁律", value=current_manifesto, height=150, key="txt_manifesto_main")
+                    
+                    if st.button("💾 保存宪法", key="save_manifesto_btn"):
+                        # 1. 存入数据库
+                        engine.set_setting('system_manifesto', new_manifesto)
+                        # 2. 更新内存
+                        st.session_state['system_manifesto'] = new_manifesto
+                        st.success("✅ 宪法已更新，AI 将立即执行新规！")
+                
+                st.divider()
+                # ==========================================
+                # 2. 具体策略管理 (原有的代码保持在下面)
+                # ==========================================
+                st.markdown("##### 📦 具体策略管理")
                 st.caption("定义你的每一招，AI 会检查你是否动作变形。")
                 
                 all_strategies = engine.get_all_strategies()
