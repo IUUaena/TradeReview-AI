@@ -2799,78 +2799,46 @@ if selected_key:
                                         win_rate = len(df_target[df_target['net_pnl'] > 0]) / len(df_target) * 100
                                         avg_rr = df_target[df_target['net_pnl'] > 0]['net_pnl'].mean() / abs(df_target[df_target['net_pnl'] < 0]['net_pnl'].mean()) if not df_target[df_target['net_pnl'] < 0].empty else 0
                                         
-                                        # === C. 生成 AI 深度报告 ===
-                                        trades_summary = []
-                                        for _, t in df_target.iterrows():
-                                            extra_info = ""
-                                            if 'mad' in t and pd.notna(t['mad']): extra_info += f" | MAD:{t['mad']}m"
-                                            if 'efficiency' in t and pd.notna(t['efficiency']): extra_info += f" | Eff:{t['efficiency']:.2f}"
-                                            trades_summary.append(
-                                                f"- {t.get('close_date_str', 'N/A')} {t.get('symbol', 'N/A')} ${t.get('net_pnl', 0):.2f} | 策略:{t.get('strategy', '无')} | 心态:{t.get('mental_state', '无')}{extra_info}"
-                                            )
-                                        summary_text = "\n".join(trades_summary)
+                                        # === C. 生成 AI 深度报告 (V7.1 调用) ===
+                                        # 以前这里是手动拼接 summary_text 和 prompt，现在直接调用封装好的函数
                                         
-                                        prompt = f"""
-                                        你是一名严厉的交易系统审计师。请根据以下数据生成一份【阶段性体检报告】。
-
-                                        【重要】请在回复的第一行，用【】给这份报告起一个简短犀利的标题，例如【震荡期磨损严重】、【趋势捕捉完美】、【知行不一警告】。
-
-                                        环境: {benchmark_symbol} 涨跌 {btc_return:.2f}%
-
-                                        账户: 盈亏 ${total_pnl:.2f} | 胜率 {win_rate:.1f}% | 盈亏比 {avg_rr:.2f}
-
-                                        交易流水:
-
-                                        {summary_text}
-
-                                        审计重点：
-
-                                        1. 一致性：是否在乱做？
-
-                                        2. 盈亏同源：是否靠运气？
-
-                                        3. 执行力：止损和持仓是否坚决？
-
-                                        输出风格：不要废话，直击痛点。
-
-                                        """
+                                        # 1. 为了启用 RAG 记忆增强，我们可以简单检索一下（可选）
+                                        # 如果为了完全的"最小修改"，也可以传空列表 []
+                                        memories = []
+                                        if 'memory_engine' in st.session_state:
+                                            # 尝试检索一些通用的"纪律"或"违规"相关的记忆作为背景
+                                            memories = st.session_state.memory_engine.retrieve_similar_memories("纪律 违规 心态", n_results=3)
                                         
+                                        # 2. 调用 ai_assistant.py 中的新函数
                                         try:
-                                            from ai_assistant import AIAssistant
-                                            if 'ai_assistant' not in st.session_state:
-                                                st.session_state.ai_assistant = AIAssistant()
+                                            with st.spinner(f"🧠 AI ({st.session_state.get('ai_model', 'deepseek-chat')}) 正在进行 Vegas 系统审计..."):
+                                                report_content = generate_batch_review_v3(
+                                                    api_key=st.session_state['ai_key'],
+                                                    base_url=st.session_state.get('ai_base_url'),
+                                                    trades_df=df_target,
+                                                    system_manifesto=st.session_state.get('system_manifesto', ''),
+                                                    report_type=report_identifier,
+                                                    model_name=st.session_state.get('ai_model', 'deepseek-chat'),
+                                                    related_memories=memories
+                                                )
                                             
-                                            # 使用 session 中的 key 和 url
-                                            st.session_state.ai_assistant.set_key(
-                                                st.session_state.get('ai_key'),
-                                                st.session_state.get('ai_base_url')
-                                            )
-                                            
-                                            report_content = st.session_state.ai_assistant.client.chat.completions.create(
-                                                model=st.session_state.get('ai_model', 'deepseek-chat'),
-                                                messages=[
-                                                    {"role": "system", "content": "你是专业的量化交易审计师。"},
-                                                    {"role": "user", "content": prompt}
-                                                ],
-                                                temperature=0.7
-                                            ).choices[0].message.content
-                                            
-                                            # 解析标题 (取第一行，去除 markdown 符号)
+                                            # 3. 解析标题 (逻辑保持不变，适配新 Prompt 的 Markdown 格式)
+                                            # 新 Prompt 第一行通常是 "## 🏥 Vegas 系统体检报告..."
                                             lines = report_content.split('\n')
-                                            title_line = lines[0].strip().replace('#', '').replace('*', '').replace('【', '').replace('】', '')
+                                            title_line = lines[0].strip().replace('#', '').replace('*', '').replace('【', '').replace('】', '').replace('🏥', '').replace('Vegas', '').replace('系统体检报告', '').strip()
                                             if len(title_line) > 20: title_line = title_line[:20] + "..."
-                                            if not title_line: title_line = "系统体检报告"
+                                            if not title_line: title_line = "Vegas系统审计"
                                             
                                             st.write(report_content)
                                             
-                                            # 保存报告
+                                            # 4. 保存报告 (逻辑保持不变)
                                             if selected_key:
                                                 start_date = str(df_target.iloc[0].get('open_date_str', ''))
                                                 end_date = str(df_target.iloc[-1].get('close_date_str', ''))
                                                 
                                                 engine.save_ai_report(
-                                                    title_line, # 标题
-                                                    report_identifier, # 类型/标识
+                                                    title_line, 
+                                                    report_identifier, 
                                                     start_date,
                                                     end_date,
                                                     len(df_target), total_pnl, win_rate, 
@@ -2879,7 +2847,7 @@ if selected_key:
                                                 )
                                                 st.success(f"✅ 报告已生成并归档：{title_line}")
                                                 time.sleep(1)
-                                                st.rerun() # 刷新以显示在下方列表
+                                                st.rerun()
                                             
                                         except Exception as e:
                                             st.error(f"AI 生成失败: {str(e)}")

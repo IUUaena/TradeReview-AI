@@ -147,208 +147,154 @@ class AIAssistant:
 
 def audit_single_trade(api_key, base_url, trade_data, system_manifesto="", strategy_rules="", image_path=None, model_name="deepseek-chat", related_memories=[]):
     """
-    v7.0 自动分析版：AI 自动分析 Vegas 趋势和卖飞情况，无需前端手动传递
-    增强版：修复 float(None) 崩溃问题
+    v7.2 单笔审计：刚性趋势 + 柔性价格行为 (Rigid Trend + Fluid PA)
     """
     try:
-        # === 1. 数据清洗 (关键步骤) ===
-        # 定义一个内部函数，安全地从字典获取数据，如果是 None 则返回默认值
+        # === 1. 数据清洗 ===
         def safe_get(key, default):
             val = trade_data.get(key)
             return val if val is not None else default
         
-        # 获取关键字段，防止 None 传给后续函数
         symbol = safe_get('symbol', 'Unknown')
         direction = safe_get('direction', 'Long')
         price = safe_get('price', 0)
+        open_ts = safe_get('open_time', int(datetime.now().timestamp() * 1000))
+        close_ts = safe_get('close_time', open_ts)
         
-        # 时间戳处理：防止 None 导致 int() 报错
-        open_ts = safe_get('open_time', None)
-        close_ts = safe_get('close_time', None)
-        if not open_ts: 
-            open_ts = int(datetime.now().timestamp() * 1000)
-        if not close_ts: 
-            close_ts = open_ts
-        
-        # 直接使用传入的 base_url，不乱改
+        # 初始化 AI
         client = get_client(api_key, base_url)
-        
-        # ============ 🧠 v7.0 新增：AI 自动分析 ============
-        # 创建 AI 助手实例，让它自动分析趋势和卖飞情况
         ai_helper = AIAssistant(api_key=api_key, base_url=base_url)
         
-        # 1. 运行分析 (传入清洗后的数据)
+        # 自动分析上帝视角 (Vegas Trend)
         trend_context = ai_helper._analyze_vegas_trend(symbol, open_ts)
         what_if_result = ai_helper._analyze_missed_profit(symbol, direction, close_ts, price)
-        # ====================================================
         
-        # 2. 准备数据 (防空护盾)
+        # 准备上下文数据
         t = trade_data
-        net_pnl = safe_get('net_pnl', 0)
-        try: 
-            net_pnl = float(net_pnl) 
-        except: 
-            net_pnl = 0.0
-        
+        net_pnl = float(t.get('net_pnl', 0))
         pnl_emoji = "✅" if net_pnl > 0 else "❌"
         
-        def safe_num(val, decimals=2):
-            if val is None or str(val).lower() in ['nan', 'none', '', 'null']: return "N/A"
-            try: 
-                return f"{float(val):.{decimals}f}"
-            except: 
-                return "N/A"
+        def safe_num(val): return f"{float(val):.2f}" if val is not None else "N/A"
         
-        def safe_str(val, default="无"):
-            if val is None or str(val).lower() in ['nan', 'none', '', 'null']: return default
-            return str(val).strip() or default
-        
-        mae = t.get('mae')
-        mfe = t.get('mfe')
-        metrics_text = "【微观数据】: 暂无详细指标 (请点击'🚀 计算指标')"
-        
-        if mae is not None and str(mae) != 'nan':
+        metrics_text = "【微观数据】: 暂无"
+        if t.get('mae') is not None:
             metrics_text = f"""
         【微观数据】
-        - R倍数: MAE -{safe_num(mae)}R | MFE +{safe_num(mfe)}R
-        - 心理压力: 痛苦时长 {safe_num(t.get('mad'), 0)}min | 抗单 {safe_num(t.get('mae_atr'), 1)}x ATR
-        - 量价结构: RVOL {safe_num(t.get('rvol'))} | 结构 {safe_str(t.get('structure_info'), "未检测")}
-        - 入场信号: {safe_str(t.get('pattern_signal'), "无显著形态")}
-        - 交易质量: 效率 {safe_num(t.get('efficiency'))}
+        - R倍数: MAE -{safe_num(t.get('mae'))}R | MFE +{safe_num(t.get('mfe'))}R
+        - 心理压力: 痛苦时长 {safe_num(t.get('mad'))}min
+        - 量价结构: RVOL {safe_num(t.get('rvol'))}
         """
         
         context_text = f"""
         【交易档案】
-        - 标的: {safe_str(t.get('symbol'))} ({safe_str(t.get('direction'))})
+        - 标的: {t.get('symbol')} ({t.get('direction')})
         - 结果: {pnl_emoji} ${safe_num(net_pnl)}
-        - 时间: {safe_str(t.get('open_date_str'))}
         
         {metrics_text}
         
-        【上帝视角】
+        【上帝视角 (AI Auto-Analysis)】
         - 宏观趋势: {trend_context}
         - 离场评价: {what_if_result}
         
-        【交易者笔记】
-        策略: {safe_str(t.get('strategy'))}
-        心态: {safe_str(t.get('mental_state'))}
-        复盘: {safe_str(t.get('notes'))}
+        【交易员主观记录】
+        - 策略标签: {t.get('strategy', '无')}
+        - 心态标签: {t.get('mental_state', '无')}
+        - 执行标签: {t.get('process_tag', '无')}
+        - 详细笔记: "{t.get('notes', '无')}"
         """
         
-        # === 构建 RAG 记忆上下文 ===
+        # === RAG 记忆增强 ===
         memory_text = ""
         if related_memories:
-            memory_list = []
-            for m in related_memories:
-                meta = m['meta']
-                # 格式化一条历史记忆
-                memory_list.append(
-                    f"- 历史教训 ({meta['date']}): 做了 {meta['symbol']}，结果 {meta['pnl']}U。\n"
-                    f"  当时笔记: \"{m['note']}\"\n"
-                    f"  心态: {meta['mental_state']} | 策略: {meta['strategy']}"
-                )
-            memory_block = "\n".join(memory_list)
-            memory_text = f"""
-
-【你的长期记忆 (RAG)】
-我检索到了你过去处理类似情况的记录，请参考这些"前车之鉴"来点评当前交易：
-
-{memory_block}
-
-"""
-        else:
-            memory_text = "【长期记忆】: 暂无相关历史记录。"
+            mem_list = [f"- {m['meta']['date']} {m['meta']['symbol']}: {m['note']}" for m in related_memories]
+            memory_block = "\n".join(mem_list[:3])
+            memory_text = f"【历史相关记忆】:\n{memory_block}"
         
-        # 2. 构建 System Prompt
-        manifesto_part = f"【系统宪法】: {system_manifesto}" if system_manifesto else ""
+        # === 核心 Prompt：刚柔并济版 ===
+        manifesto_part = f"【用户个人宪法 (最高优先级)】: {system_manifesto}" if system_manifesto else ""
         strategy_part = f"【策略定义】: {strategy_rules}" if strategy_rules else ""
-        
         system_prompt = f"""
-        你是一名华尔街顶级交易员教练。请根据以下数据进行审计。
+        # ROLE DEFINITION
+        You are the **Vegas-Brooks Chief Dealer**, a highly experienced discretionary trader. 
+        Your job is to audit trades by combining the **Rigid Structure of Vegas Tunnels** with the **Fluid Logic of Price Action**.
         
+        # 1. THE RIGID LAWS (The Constitution)
+        - **Trend Context:** We ONLY trade in the direction of the Major Trend (EMA 288/338).
+        - **Value Zone:** We look for setups near the Vegas Tunnel (144/169).
+        - **Risk Control:** R:R must be reasonable (>= 1.5 preferred).
+        
+        # 2. THE FLUID LOGIC (Price Action & Market Dynamics)
+        **Do NOT just look for textbook "High 2" patterns.** Markets are messy. 
+        Instead, use your deep knowledge of Price Action (Al Brooks / Wyckoff) to analyze the **Battle between Bulls and Bears**:
+        - **Pullback Quality (调整结构):** - Is the pullback "orderly" (weak volume, small candles)? Or is it a "crash" (panic selling)?
+          - Look for: Bull Flags, Wedges, Micro Double Bottoms, or simple drying up of selling pressure.
+          
+        - **Entry Signal (入场信号):**
+          - Does the entry bar show **Conviction**? (Strong Close, Big Body).
+          - Is there a "Shift in Momentum"? (e.g., a strong Green bar engulfing previous weak Red bars).
+          - Even if it's not a standard H2, does the context justify the entry? (e.g., strong trend resumption).
+        
+        # 3. PSYCHOLOGY & EXECUTION CHECK
+        - Analyze the user's **Notes** and **Tags**.
+        - Did they enter because they saw a valid reversal, or just because they were scared of missing out (FOMO)?
+        - Check for **Consistency**: Did they tag it "Good Process" but entered against the trend? Call them out.
+        
+        # NEGATIVE CONSTRAINTS
+        - IGNORE Indicators like RSI, MACD. Focus on Price, Volume, and EMAs.
+        - Don't be a robot. If a trade makes sense logically but misses a specific rule slightly, acknowledge the nuance.
+        
+        # DYNAMIC INPUTS
         {manifesto_part}
         {strategy_part}
         {memory_text}
         
-        审计逻辑：
-        1. **宏观与择时**：参考【上帝视角】的 Vegas 趋势。
-        2. **结构与位置**：如果结构显示"逼近阻力位"却做多，严厉批评。
-        3. **入场依据**：检查入场信号。如果是"无显著形态"，批评其随机交易。
-        4. **执行质量**：结合 MAD(痛苦时长) 和 卖飞情况进行点评。
+        # OUTPUT FORMAT (Markdown in Simplified Chinese)
+        **IMPORTANT: Output in Simplified Chinese.**
+        
+        Structure:
+        - **⚖️ 审计结论**: [优 / 良 / 差 / 严重违规] (给出一个定性的评价)
+        - **🧠 价格行为深度解析**: (Use your full PA knowledge. Describe the buying/selling pressure. Why did this setup work or fail?)
+        - **📉 结构与趋势**: (Was it with the Vegas trend? Was the pullback healthy?)
+        - **🧘 知行合一检查**: (Compare Notes vs. Reality)
+        - **💡 改进建议**: (How to optimize the entry timing or location?)
         """
         
         messages = [{"role": "system", "content": system_prompt}]
         
-        # --- 3. 智能判断：该模型是否支持看图？ ---
-        # 只有这些模型才发送图片数据
+        # 处理图片 (视觉模型)
         support_vision_models = ["gpt-4o", "gemini", "claude", "vision"]
         can_see_image = any(m in model_name.lower() for m in support_vision_models)
-        
-        # 特殊排除：DeepSeek 即使名字里没写 text，目前也不支持图片
-        if "deepseek" in model_name.lower():
-            can_see_image = False
+        if "deepseek" in model_name.lower(): can_see_image = False
         
         base64_image = encode_image(image_path)
         
         if base64_image and can_see_image:
-            # === 视觉模式 (Vision Mode) ===
-            image_ext = os.path.splitext(image_path)[1].lower() if image_path else '.jpeg'
-            mime_type = mimetypes.guess_type(image_path)[0] if image_path else 'image/jpeg'
-            if not mime_type:
-                # 根据扩展名判断
-                if image_ext in ['.png']:
-                    mime_type = 'image/png'
-                elif image_ext in ['.jpg', '.jpeg']:
-                    mime_type = 'image/jpeg'
-                elif image_ext in ['.gif']:
-                    mime_type = 'image/gif'
-                else:
-                    mime_type = 'image/jpeg'  # 默认
-            
             user_content = [
                 {"type": "text", "text": f"这是这笔交易的详细记录和K线截图，请审计：\n{context_text}"},
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:{mime_type};base64,{base64_image}",
-                        "detail": "high"
-                    }
-                }
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
             ]
-            print(f"👁️ 正在发送视觉请求 (Model: {model_name})...")
         else:
-            # === 纯文本模式 (Text Mode) ===
-            # DeepSeek 或无图时走这里
-            user_content = f"请审计这笔交易 (截图不可用或模型不支持)：\n{context_text}"
-            print(f"📝 正在发送纯文本请求 (Model: {model_name})...")
+            user_content = f"请审计这笔交易 (无图模式)：\n{context_text}"
         
         messages.append({"role": "user", "content": user_content})
         
-        # 🟢 关键：使用传入的 model_name
-        print(f"DEBUG: Calling model -> {model_name}")
-        
-        # 4. 发送请求 (带重试)
         api_params = {
             "model": model_name,
             "messages": messages,
             "timeout": 90
         }
-        
-        # DeepSeek Reasoner 不加 temperature
         if "reasoner" not in model_name.lower():
             api_params["temperature"] = 0.7
-        
+            
         response = call_api_with_retry(client, api_params)
         return response.choices[0].message.content
     
     except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return f"审计失败: {str(e)} (建议检查数据完整性或API连接)"
+        return f"审计失败: {str(e)}"
 
 def generate_batch_review_v3(api_key, base_url, trades_df, system_manifesto="", report_type="最近30笔", model_name="deepseek-chat", related_memories=[]):
     """
-    v5.0 批量诊断：结合历史记忆生成报告
+    v7.2 周期性审计：Vegas 刚柔并济版 (Rigid Trend + Fluid PA)
     """
     try:
         if trades_df.empty:
@@ -356,97 +302,119 @@ def generate_batch_review_v3(api_key, base_url, trades_df, system_manifesto="", 
         
         client = get_client(api_key, base_url)
         
-        # 1. 高级统计 (统计 v3.0 新字段)
+        # === 1. 保留核心心理统计 (Do Not Delete) ===
         total_trades = len(trades_df)
+        # 知行合一率 (基于 Process 标签)
         good_process_count = len(trades_df[trades_df['process_tag'].str.contains("Good", na=False)])
-        fomo_count = len(trades_df[trades_df['mental_state'].str.contains("FOMO|Tilt|Revenge", na=False, case=False)])
         process_adherence = (good_process_count / total_trades) * 100 if total_trades > 0 else 0
+        # 情绪化交易 (基于 Mental State 标签)
+        fomo_count = len(trades_df[trades_df['mental_state'].str.contains("FOMO|Tilt|Revenge", na=False, case=False)])
         
-        # 2. 构建精简摘要 (新增 MAE/MFE)
+        # 基础盈亏
+        total_pnl = trades_df['net_pnl'].sum()
+        win_count = len(trades_df[trades_df['net_pnl'] > 0])
+        win_rate = (win_count / total_trades * 100) if total_trades > 0 else 0
+        
+        # === 2. 构建交易流水 (增强版) ===
         trades_summary = []
         for _, t in trades_df.iterrows():
-            close_date_str = str(t.get('close_date_str', ''))
-            if close_date_str and len(close_date_str) > 10:
-                short_time = close_date_str[5:]
-            else:
-                short_time = close_date_str
+            date_str = str(t.get('close_date_str', 'N/A'))
+            short_time = date_str[5:] if len(date_str) > 10 else date_str
+            pnl_str = f"{t.get('net_pnl', 0):+.0f}"
             
-            pnl_sign = "+" if t.get('net_pnl', 0) > 0 else ""
-            
-            # 格式化 MAE/MFE
-            mae_val = t.get('mae')
-            mfe_val = t.get('mfe')
-            pa_str = ""
-            if mae_val is not None and str(mae_val) != 'nan':
-                pa_str = f"| MAE:{float(mae_val):.1f}% MFE:{float(mfe_val):.1f}%"
-            
-            # 格式: [时间] 盈亏 | 心态 | 执行 | MAE/MFE
-            line = (f"[{short_time}] {pnl_sign}{t.get('net_pnl', 0):.0f}U | "
-                    f"心态:{t.get('mental_state', '-')} | "
-                    f"执行:{t.get('process_tag', '-')} "
-                    f"{pa_str}")
+            # 提取关键信息供 AI 分析
+            line = (
+                f"| {short_time} | {t.get('symbol')} | {t.get('direction')} | {pnl_str}U | "
+                f"策略:{t.get('strategy', '-')} | "
+                f"心态:{t.get('mental_state', '-')} | "
+                f"执行:{t.get('process_tag', '-')} | "
+                f"笔记:{str(t.get('notes', ''))[:30]}..."
+            )
             trades_summary.append(line)
         
         trades_text = "\n".join(trades_summary)
         
-        # === 🧠 构建记忆上下文 ===
+        # === 3. 记忆回溯 (RAG) ===
         memory_text = ""
         if related_memories:
-            # 这里的记忆可能是"一般性的长期错误模式"
             mem_list = [f"- {m['note']}" for m in related_memories]
-            memory_block = "\n".join(mem_list[:5])  # 只取前5条避免太长
-            memory_text = f"""
-
-【长期顽疾档案 (RAG)】
-我们在数据库中检索到了你长期以来的典型错误模式，请对比本次报告进行验证：
-
-{memory_block}
-
-"""
+            memory_block = "\n".join(mem_list[:3])
+            memory_text = f"【历史顽疾档案】:\n{memory_block}"
         
-        # 3. 导师人设
+        # === 4. Prompt 升级：刚性趋势 + 柔性博弈 ===
         system_prompt = f"""
-        你是一名交易教练。请根据【本期交易流水】和【长期顽疾档案】生成诊断报告。
+        # ROLE
+        You are the **Vegas-Brooks Portfolio Manager**. You are auditing the trader's recent performance.
         
-        【系统宪法】: {system_manifesto if system_manifesto else "未提供"}
+        # 1. THE RIGID LAWS (Trend & Risk)
+        - **Major Trend:** We ONLY trade WITH the 288/338 EMA. (No fighting the river).
+        - **Value Zone:** We wait for setups near the 144/169 Tunnel.
+        - **Risk Control:** Stop losses must be respected.
+        
+        # 2. THE FLUID LOGIC (Structure Quality)
+        **Do NOT just count 'High 2' patterns.** Use your Price Action knowledge to evaluate the **Quality of Execution**:
+        - **Sniper vs. Machine Gun:** Did the trader wait for high-quality structures (e.g., Wedges, Tight Flags, Momentum Shifts) at the tunnel? Or did they enter randomly (Machine Gun mode)?
+        - **Patience:** Look at the "Notes". Did they mention "Waiting", "Confirmation"?
+        - **Adaptability:** Did they adapt to market context, or force a setup where there was none?
+        
+        # USER'S MANIFESTO
+        "{system_manifesto}"
         
         {memory_text}
         
-        【执行数据】
-        - 知行合一率 (Good Process): {process_adherence:.1f}% (低于80%是不合格的)
-        - 情绪化交易次数 (FOMO/上头): {fomo_count} 次
+        # EXECUTION DATA (Psych Stats)
+        - **Self-Rated Process Adherence**: {process_adherence:.1f}% 
+        - **Emotional Trades (FOMO)**: {fomo_count} times
+        - **Win Rate**: {win_rate:.1f}% | PnL: ${total_pnl:.2f}
         
-        请生成一份《深度行为诊断报告》，重点分析：
-        1. **旧病复发检测**：他在本期交易中，是否又犯了档案里记录的那些老毛病？
-        2. **进步确认**：如果本期没有犯老毛病，请给予肯定。
-        3. **亏损归因**：他的亏损主要是因为"乱做(Bad Process)"还是"系统成本"？
-        4. **情绪与盈亏**：当他处于 FOMO 或上头状态时，结局通常如何？
-        5. **深度归因**：结合 RAG 记忆，分析亏损的根源是技术问题还是心理顽疾。
-        6. **系统宪法执行度**：他是否在知行合一？
+        # YOUR AUDIT TASKS
+        Review the "Trade Log" and "Execution Data". Generate a report in **Simplified Chinese**.
         
-        请用严厉、专业、一针见血的语气。
+        **1. Trend Loyalty (趋势忠诚度 - Rigid):**
+        - Is the trader swimming with the current or fighting it?
+        
+        **2. Structure Quality (结构质量 - Fluid):**
+        - Analyze the logic behind the trades. Are they entering on **Logic (Price Action)** or **Impulse (FOMO)**?
+        - Comment on their ability to identify "Supply/Demand imbalances" vs just "hoping".
+        
+        **3. Psychology & Consistency:**
+        - Cross-check: The user claims {process_adherence:.1f}% compliance. Does the PnL and trade frequency support this?
+        - Are losses caused by "System Cost" (Good trades that failed) or "Discipline Collapse" (Bad trades)?
+        
+        # OUTPUT FORMAT (Markdown in Chinese)
+        ## 🏥 Vegas 周期体检报告 ({report_type})
+        
+        **📊 核心看板**:
+        - 盈亏: ${total_pnl:.2f} (胜率 {win_rate:.1f}%)
+        - **狙击手指数**: [0-10分] (评价等待优质结构的耐心)
+        - **心理稳定性**: [0-10分] (基于 FOMO 次数和知行合一率)
+        
+        **🔍 深度洞察**:
+        1. **趋势大局观**: ...
+        2. **结构与择时**: (重点分析是凭逻辑做单还是凭感觉做单)
+        3. **主要失血点**: (区分是系统内亏损还是胡乱亏损)
+        
+        **💊 处方**:
+        (给出 2 条建议：一条关于技术精进，一条关于心态控制)
         """
         
-        # v3.5: 支持 reasoner 模型
+        # 5. 调用 AI
         api_params = {
             "model": model_name,
             "messages": [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"交易流水：\n{trades_text}"}
+                {"role": "user", "content": f"Trade Log:\n{trades_text}"}
             ],
-            "timeout": 120  # 推理模型可能较慢，增加超时时间
+            "timeout": 120
         }
         
-        # ⚠️ 针对 deepseek-reasoner 的特殊处理：不支持 temperature 参数
         if "reasoner" not in model_name.lower():
-            api_params["temperature"] = 0.5
-        
+            api_params["temperature"] = 0.5  # 保持一定的灵活性
+            
         response = client.chat.completions.create(**api_params)
-        
         return response.choices[0].message.content
-    
     except Exception as e:
-        return f"批量分析失败: {str(e)}"
+        return f"周期审计失败: {str(e)}"
 
 # 保留旧版本函数以保持兼容性
 def get_ai_analysis(api_key, base_url, trade_data, user_notes=""):
@@ -584,112 +552,87 @@ def generate_batch_review(api_key, base_url, trades_df, report_type="最近30笔
 
 def review_potential_trade(api_key, base_url, plan_data, system_manifesto, model_name="deepseek-chat", related_memories=[]):
     """
-    v5.0 事前风控：审查潜在交易计划（支持 RAG 记忆）
+    v7.2 事前风控：刚性规则 + 柔性逻辑 (Rigid Rules + Fluid Logic)
     """
     try:
         client = get_client(api_key, base_url)
         
-        # 1. 计算盈亏比和风险
+        # 1. 基础数学计算
         entry = float(plan_data['entry'])
         sl = float(plan_data['sl'])
         tp = float(plan_data['tp'])
         risk_money = float(plan_data['risk_money'])
         
-        # 自动识别方向
-        direction = "做多 (Long)" if entry > sl else "做空 (Short)"
-        
-        # 计算潜在亏损幅度和盈亏比
+        direction = "Long" if entry > sl else "Short"
         risk_per_share = abs(entry - sl)
-        reward_per_share = abs(tp - entry)
+        if risk_per_share == 0: return "❌ 止损价无效"
         
-        if risk_per_share == 0: 
-            return "❌ 止损价不能等于开仓价"
-        
-        rr_ratio = reward_per_share / risk_per_share
-        
-        # 建议仓位 (以损定仓公式)
-        # 数量 = 风险金额 / 单股止损差价
         qty = risk_money / risk_per_share
         position_value = qty * entry
+        rr_ratio = abs(tp - entry) / risk_per_share
         
-        # 计算止损距离百分比
-        if entry > 0:
-            stop_distance_pct = abs(entry - sl) / entry * 100
-        else:
-            stop_distance_pct = 0
-        
-        # === 🧠 构建记忆上下文 ===
+        # 2. 记忆上下文
         memory_text = ""
         if related_memories:
-            mem_list = [f"- {m['meta']['date']} {m['meta']['symbol']}: {m['note']}" for m in related_memories]
-            memory_block = "\n".join(mem_list)
-            memory_text = f"""
-
-【⚠️ 历史警示 (RAG)】
-在你过去的操作中，我发现了以下相关教训，请务必对照检查本次计划是否重犯：
-
-{memory_block}
-
-"""
-        else:
-            memory_text = "【历史记忆】: 暂无特定风险记录。"
+            mem_list = [f"- {m['meta']['date']}: {m['note']}" for m in related_memories]
+            memory_block = "\n".join(mem_list[:3])
+            memory_text = f"【历史相关教训】:\n{memory_block}"
         
-        # 2. 构建审查 prompt
+        # 3. 交易计划上下文
         context = f"""
         【拟定交易计划】
-        - 方向: {direction}
-        - 标的: {plan_data['symbol']}
-        - 入场价: {entry}
-        - 止损价: {sl} (距离 {stop_distance_pct:.2f}%)
-        - 止盈价: {tp}
-        - 计划风险金额: ${risk_money} (以损定仓)
-        - 盈亏比 (R:R): {rr_ratio:.2f}
-        - 建议开仓数量: {qty:.4f} 个
-        - 建议持仓价值: ${position_value:.2f}
+        - 方向: {direction} | 标的: {plan_data['symbol']}
+        - 价格: 入场 {entry} | 止损 {sl} | 止盈 {tp}
+        - 资金: 风险 ${risk_money} | 仓位价值 ${position_value:.2f}
+        - 盈亏比: {rr_ratio:.2f}R
         """
         
+        # 4. Prompt 升级：刚性防线 + 柔性审核
         system_prompt = f"""
-        你是一名严格的【交易风控官】。请审查以下"拟定交易计划"。
+        You are the **Vegas-Brooks Risk Gatekeeper**. You are evaluating a live trade plan.
         
-        【系统宪法 (必须遵守的铁律)】:
+        # YOUR PHILOSOPHY
+        - **Trend is King:** Respect the Vegas Tunnel (144/169/288/338).
+        - **Price Action is Queen:** We need a reason to enter, but it doesn't have to be a perfect textbook pattern.
+        
+        # EVALUATION CRITERIA (The Checkpoint)
+        1. **Context (Location - Rigid):** - Is the price at a "Value Area" (Vegas Tunnel)? 
+           - Or are we chasing in the middle of nowhere (Extended)?
+           
+        2. **Story of Price (Structure - Fluid):** - **Exhaustion:** Is the selling pressure drying up? (Small candles, tails).
+           - **Structure:** Is there a recognizable pattern? (Wedge, Flag, Micro Double Bottom, VCP).
+           - **Logic Check:** Does this trade imply "Buying Low in an Uptrend" (Good) or "Catching a Knife" (Bad)?
+           - Use your autonomous judgment: Does the Supply/Demand balance favor this trade?
+           
+        3. **Risk Logic (Rigid):** R:R must be >= 1.5.
+        
+        # USER'S MANIFESTO (Personal Laws)
+        The user has sworn to follow these rules. Enforce them:
         "{system_manifesto}"
-        
         {memory_text}
         
-        请进行事前拦截检查：
-        1. **历史一致性**：如果历史记忆显示他经常在类似位置/币种上亏损，请大声喝止。
-        2. **盈亏比检查**：R:R 是否符合宪法要求？（通常要求 > 2.0 或 3.0）
-        3. **止损合理性**：止损幅度是否过窄（容易被打）或过宽？
-        4. **风险一致性**：这笔交易是否符合顺势/逆势的逻辑（如果宪法里提到了）？
+        # OUTPUT FORMAT (Markdown in Simplified Chinese)
+        **IMPORTANT: Output in Simplified Chinese.**
         
-        ### 输出格式：
-        **🛑 审查结果**：(通过 / 拒绝 / 需谨慎)
-        
-        **⚖️ 盈亏比评价**：(如 "R:R 1.5 太低，建议放弃")
-        
-        **🧠 记忆回溯点评**：(如果有关联记忆，对比历史教训进行点评)
-        
-        **🛡️ 仓位建议**：(确认计算出的仓位是否合理)
-        
-        **💡 导师建议**：(一句话点评)
+        **🛑 最终裁决**: [批准 / 需谨慎 / 拒绝]
+        **🧠 逻辑推演**: (Explain the Price Action story. Why is this a good/bad spot? Describe the "Force" of the market.)
+        **⚖️ 盈亏比检查**: (Value)
+        **💡 交易员建议**: (Short, punchy advice based on live PA, e.g. "Wait for the 5m candle close")
         """
         
-        # v3.5: 支持 reasoner 模型
+        # 调用 AI
         api_params = {
             "model": model_name,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": f"请审查这笔计划：\n{context}"}
             ],
-            "timeout": 60  # 推理模型可能较慢，增加超时时间
+            "timeout": 60
         }
-        
-        # ⚠️ 针对 deepseek-reasoner 的特殊处理：不支持 temperature 参数
         if "reasoner" not in model_name.lower():
-            api_params["temperature"] = 0.3
-        
+            api_params["temperature"] = 0.3 # 风控稍微严谨一点
+            
         response = client.chat.completions.create(**api_params)
-        
         return response.choices[0].message.content
     except Exception as e:
         return f"风控审查失败: {str(e)}"

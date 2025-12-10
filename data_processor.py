@@ -4,7 +4,7 @@ import pandas_ta as ta  # 👈 必须要有这个库
 
 def process_trades_to_rounds(df):
     """
-    v7.0 核心算法：高性能交易回合生成引擎
+    v7.1 核心算法：高性能交易回合生成引擎 (修复字段透传缺失问题)
     """
     if df is None or df.empty:
         return pd.DataFrame()
@@ -12,18 +12,24 @@ def process_trades_to_rounds(df):
     # 1. 向量化预处理
     df = df.sort_values(by='timestamp', ascending=True).reset_index(drop=True)
     
-    # 填充缺失值
+    # 填充缺失值 (包含 v3.0/v7.0/v8.0 所有关键字段)
     fill_values = {
         'amount': 0.0, 'pnl': 0.0, 'fee': 0.0, 
         'notes': '', 'strategy': '', 'ai_analysis': '',
         'mae': np.nan, 'mfe': np.nan, 'etd': np.nan,
-        'screenshot': ''
+        'screenshot': '',
+        # === 🟢 修复：补充缺失字段的默认值 ===
+        'process_tag': '', 'mental_state': '', 'mistake_tags': '',
+        'setup_rating': 0, 'rr_ratio': 0.0,
+        'mad': np.nan, 'efficiency': np.nan, 'rvol': np.nan, 'pattern_signal': ''
     }
+    
     for col, val in fill_values.items():
         if col not in df.columns:
             df[col] = val
         else:
             df[col] = df[col].fillna(val)
+            
     rounds = []
     grouped = df.groupby('symbol')
     
@@ -43,11 +49,10 @@ def process_trades_to_rounds(df):
             pnl = float(row.pnl)
             commission = float(row.fee)
             timestamp = row.timestamp
-            # 兼容处理 side
             side = str(row.side).lower() if hasattr(row, 'side') else ''
-            # 兼容处理 id
             row_id = str(row.id)
             
+            # 判断开仓 (当前持仓为0)
             if abs(current_qty) < 0.0000001: 
                 start_time = timestamp
                 open_id = row_id
@@ -58,7 +63,7 @@ def process_trades_to_rounds(df):
                 current_pnl = pnl 
                 current_commission = commission
                 
-                # 缓存元数据
+                # 缓存元数据 (抓取第一笔开仓单上的标签)
                 meta_cache = {
                     'notes': getattr(row, 'notes', ''),
                     'strategy': getattr(row, 'strategy', ''),
@@ -66,7 +71,17 @@ def process_trades_to_rounds(df):
                     'mae': getattr(row, 'mae', None),
                     'mfe': getattr(row, 'mfe', None),
                     'etd': getattr(row, 'etd', None),
-                    'screenshot': getattr(row, 'screenshot', '')
+                    'screenshot': getattr(row, 'screenshot', ''),
+                    # === 🟢 修复：抓取并透传这些复盘标签 ===
+                    'process_tag': getattr(row, 'process_tag', ''),
+                    'mental_state': getattr(row, 'mental_state', ''),
+                    'setup_rating': getattr(row, 'setup_rating', 0),
+                    'mistake_tags': getattr(row, 'mistake_tags', ''),
+                    'rr_ratio': getattr(row, 'rr_ratio', 0.0),
+                    'mad': getattr(row, 'mad', None),
+                    'efficiency': getattr(row, 'efficiency', None),
+                    'rvol': getattr(row, 'rvol', None),
+                    'pattern_signal': getattr(row, 'pattern_signal', '')
                 }
                 
             else:
@@ -76,17 +91,16 @@ def process_trades_to_rounds(df):
                 if side == 'buy': current_qty += qty
                 else: current_qty -= qty
                 
+                # 判断平仓 (仓位回归0)
                 if abs(current_qty) < 0.0000001:
                     end_time = timestamp
                     duration_minutes = (end_time - start_time) / 1000 / 60
                     
-                    mae_val = meta_cache.get('mae')
-                    mfe_val = meta_cache.get('mfe')
-                    etd_val = meta_cache.get('etd')
-                    
-                    if pd.isna(mae_val): mae_val = None
-                    if pd.isna(mfe_val): mfe_val = None
-                    if pd.isna(etd_val): etd_val = None
+                    # 辅助函数：提取数值
+                    def get_val(key):
+                        v = meta_cache.get(key)
+                        if pd.isna(v): return None
+                        return v
                     rounds.append({
                         'round_id': open_id,
                         'symbol': symbol,
@@ -102,17 +116,33 @@ def process_trades_to_rounds(df):
                         'net_pnl': round(current_pnl - current_commission, 2),
                         'trade_count': len(trade_ids),
                         'status': 'Closed',
+                        
+                        # --- 基础数据 ---
                         'notes': meta_cache.get('notes', ''),
                         'strategy': meta_cache.get('strategy', ''),
                         'ai_analysis': meta_cache.get('ai_analysis', ''),
                         'screenshot': meta_cache.get('screenshot', ''),
-                        'mae': mae_val,
-                        'mfe': mfe_val,
-                        'etd': etd_val
+                        
+                        # === 🟢 修复：将缓存的标签写入最终数据 ===
+                        'process_tag': meta_cache.get('process_tag', ''),
+                        'mental_state': meta_cache.get('mental_state', ''),
+                        'setup_rating': meta_cache.get('setup_rating', 0),
+                        'mistake_tags': meta_cache.get('mistake_tags', ''),
+                        'rr_ratio': meta_cache.get('rr_ratio', 0.0),
+                        
+                        # --- 价格行为数据 ---
+                        'mae': get_val('mae'),
+                        'mfe': get_val('mfe'),
+                        'etd': get_val('etd'),
+                        'mad': get_val('mad'),
+                        'efficiency': get_val('efficiency'),
+                        'rvol': get_val('rvol'),
+                        'pattern_signal': meta_cache.get('pattern_signal', '')
                     })
                     current_qty = 0
                     side_direction = 0
                     meta_cache = {} 
+    
     if not rounds:
         return pd.DataFrame()
         
