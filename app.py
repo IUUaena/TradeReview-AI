@@ -1095,8 +1095,8 @@ if selected_key:
             # ======================================================================
             # 交易列表和复盘区域 (使用 Tab 分隔)
             # ======================================================================
-            # 使用 Tab 分隔功能区
-            tab_list, tab_analysis, tab_report, tab_strategy, tab_risk = st.tabs(["📋 交易复盘", "📊 归因分析", "🔥 导师周报", "📚 策略库", "🎲 风险模拟"])
+            # 修改 Tabs 定义，增加 "实时战场"
+            tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📋 交易复盘", "📈 统计图表", "📝 导师周报", "🧪 策略实验室", "🧘 心态与过程", "⚡ 实时战场"])
             
             # === Tab 1: 原有的交易列表与详情 ===
             with tab_list:
@@ -3097,6 +3097,132 @@ if selected_key:
                             
                         else:
                             st.error(msg)
+            
+            # === Tab 6: ⚡ 实时战场 (Live Monitor) ===
+            with tab6:
+                st.subheader("⚡ 实时持仓监控与风控")
+                
+                if not selected_key:
+                    st.warning("⚠️ 请先在左侧选择一个账户")
+                else:
+                    col_live_btn, col_live_info = st.columns([1, 5])
+                    
+                    # 手动刷新按钮
+                    if col_live_btn.button("🔄 刷新持仓数据"):
+                        st.rerun()
+                    
+                    # 获取实时数据
+                    api_secret = engine.get_credentials(selected_key)
+                    if not api_secret:
+                        st.error("未找到 API Secret")
+                    else:
+                        with st.spinner("正在连接交易所获取实时数据..."):
+                            live_data, msg = engine.get_open_positions(selected_key, api_secret)
+                        
+                        if not live_data:
+                            st.error(msg)
+                        else:
+                            # 1. 解包数据
+                            total_equity = live_data.get('equity', 0.0)
+                            positions = live_data.get('positions', [])
+                            
+                            # 2. 账户概览 (Fix: 显式显示账户净值)
+                            st.markdown("### 🏦 账户概览")
+                            l1, l2, l3 = st.columns(3)
+                            
+                            # 计算总持仓名义价值 (用于算杠杆)
+                            total_notional = sum([abs(p['amount'] * p['mark_price']) for p in positions])
+                            total_unrealized_pnl = sum([p['pnl'] for p in positions])
+                            
+                            # Fix: 除零保护 (防止 float division by zero)
+                            current_leverage = 0.0
+                            if total_equity > 0:
+                                current_leverage = total_notional / total_equity
+                            
+                            l1.metric("💰 账户权益 (Equity)", f"${total_equity:,.2f}", help="USDT + USDC 总权益")
+                            l2.metric("📦 持仓总价值", f"${total_notional:,.2f}")
+                            l3.metric("⚙️ 实时杠杆率", f"{current_leverage:.2f}x", delta_color="off")
+                            
+                            # 3. 持仓详情
+                            st.markdown("### 📋 持仓详情")
+                            if not positions:
+                                st.info("🍵 当前空仓，正在等待机会...")
+                            else:
+                                for p in positions:
+                                    p_color = "green" if p['pnl'] > 0 else "red"
+                                    with st.expander(f"{p['symbol']} ({p['side']}) | 浮盈亏: ${p['pnl']:.2f}", expanded=True):
+                                        c1, c2, c3, c4 = st.columns(4)
+                                        c1.metric("持仓数量", f"{p['amount']}")
+                                        c2.metric("开仓均价", f"{p['entry_price']}")
+                                        c3.metric("标记价格", f"{p['mark_price']}")
+                                        c4.metric("ROI", f"{p['roi']:.2f}%")
+                                        
+                                        # 强平预警
+                                        if p['liquidation_price'] > 0 and p['mark_price'] > 0:
+                                            dist_liq = abs(p['mark_price'] - p['liquidation_price']) / p['mark_price'] * 100
+                                            if dist_liq < 5:
+                                                st.error(f"⚠️ 距离强平仅 {dist_liq:.2f}%！强平价: {p['liquidation_price']}")
+                                            else:
+                                                st.caption(f"距离强平: {dist_liq:.2f}% (强平价: {p['liquidation_price']})")
+                            
+                            # 4. AI 实时风控分析
+                            st.markdown("---")
+                            st.subheader("🛡️ AI 实时风控顾问")
+                            
+                            if st.button("🧠 分析当前持仓风险"):
+                                if not positions:
+                                    st.info("当前无持仓，风险为 0。建议去【复盘区】学习历史交易。")
+                                elif total_equity <= 0:
+                                    st.error("❌ 无法分析：账户权益显示为 0 或负值，请检查资金状态。")
+                                else:
+                                    if 'ai_key' not in st.session_state or not st.session_state.get('ai_key'):
+                                        st.error("请先配置 AI API Key")
+                                    else:
+                                        try:
+                                            # 构造 Prompt
+                                            pos_desc = []
+                                            for p in positions:
+                                                if p['liquidation_price'] > 0 and p['mark_price'] > 0:
+                                                    dist_liq_pct = abs(p['mark_price'] - p['liquidation_price']) / p['mark_price'] * 100
+                                                else:
+                                                    dist_liq_pct = 0
+                                                pos_desc.append(f"- {p['symbol']} {p['side']}: 仓位${p['amount']*p['mark_price']:.0f}, 浮盈亏${p['pnl']:.0f}, 距离强平{dist_liq_pct:.1f}%")
+                                            pos_text = "\n".join(pos_desc)
+                                            
+                                            prompt = f"""
+                                            我是Vegas趋势交易者。请分析我当前的实时持仓风险。
+                                            
+                                            【账户数据】
+                                            - 总权益: ${total_equity:.2f}
+                                            - 实时杠杆: {current_leverage:.2f}x
+                                            - 总浮盈亏: ${total_unrealized_pnl:.2f}
+                                            
+                                            【持仓明细】
+                                            {pos_text}
+                                            
+                                            请给出风控建议：
+                                            1. 仓位是否过重？(对比Vegas系统通常建议的轻仓)
+                                            2. 哪些单子危险（比如接近强平或亏损放大）？
+                                            3. 针对浮盈单，结合Vegas趋势给出持有或减仓建议。
+                                            """
+                                            
+                                            with st.spinner("AI 正在计算风险敞口..."):
+                                                if 'ai_assistant' not in st.session_state:
+                                                    from ai_assistant import AIAssistant
+                                                    st.session_state.ai_assistant = AIAssistant()
+                                                
+                                                st.session_state.ai_assistant.set_key(st.session_state.get('ai_key'), st.session_state.get('ai_base_url'))
+                                                
+                                                resp = st.session_state.ai_assistant.client.chat.completions.create(
+                                                    model=st.session_state.get('ai_model', 'deepseek-chat'),
+                                                    messages=[{"role": "user", "content": prompt}],
+                                                    temperature=0.7
+                                                )
+                                                st.success("✅ 分析完成")
+                                                st.markdown(resp.choices[0].message.content)
+                                                
+                                        except Exception as e:
+                                            st.error(f"分析失败: {str(e)}")
 else:
     # 登录引导页
     st.markdown("""
